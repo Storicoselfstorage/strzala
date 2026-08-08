@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  BOSS_GATE_CRYSTALS, ECONOMY_MAPS, ECONOMY_RUNNERS,
+  BOSS_GATE_CRYSTALS, ECONOMY_MAPS, ECONOMY_RUNNERS, ENEMY_SCORE,
 } from '../src/core/balance';
 import { countMapEconomy, countRunnerEconomy } from '../src/core/economy';
 import {
@@ -92,5 +92,9 @@ describe('ekonomia runnerów (patterny 8.3)', () => {
     for (const lid of LEVEL_ORDER) {
       expect(LEVEL_DEF[lid]).toBeDefined();
     }
+  });
+
+  it('punkty za przeciwników = dane v1 (levels.py ENEMY_SCORE; machacz 20, nie 30 z aneksu)', () => {
+    expect(ENEMY_SCORE).toEqual({ toczek: 20, machacz: 20, skoczka: 30 });
   });
 });

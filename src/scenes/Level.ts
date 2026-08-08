@@ -31,9 +31,13 @@ import {
 } from '../core/runnerPattern';
 import { createSim, SimEnv, simStep, SimState } from '../core/physicsSim';
 import {
-  LEVEL_DEF, LevelDef, MAPS, RUNNER_PATTERNS, THIEF_MAX, DRAGONS,
+  BOSS_P2_PLATFORMS, LEVEL_DEF, LevelDef, MAPS, RUNNER_PATTERNS, THIEF_MAX,
+  DRAGONS,
 } from '../data/levels';
-import { EVENT_MESSAGES, GAME_OVER, LEVEL_INTROS, LOSS_MESSAGES, WIN_MESSAGES } from '../data/texts';
+import {
+  EVENT_MESSAGES, GAME_OVER, LEVEL_INTROS, LOSS_MESSAGES, VABANK_TAUNTS,
+  WIN_MESSAGES,
+} from '../data/texts';
 import { Player } from '../entities/Player';
 import { Toczek, Skoczka, Machacz, ToczekSkin } from '../entities/enemies';
 import { RunnerPlayerView } from '../entities/RunnerPlayer';
@@ -121,6 +125,20 @@ interface VanishEntity {
 /** power-up (aneks 7): aktywny maks. 1, nowy nadpisuje */
 interface PowerupState { kind: 'shield' | 'magnet'; t: number; total: number }
 
+/** stan wejścia dotykowego na klatkę (kontrakt registry — TouchControls.ts) */
+interface TouchFrame {
+  left: boolean; right: boolean; down: boolean;
+  jump: boolean; shoot: boolean; magic: boolean; use: boolean;
+}
+
+const TOUCH_EDGE_KEYS = {
+  jump: 'touch.jumpPressed',
+  shoot: 'touch.shootPressed',
+  magic: 'touch.magicPressed',
+  use: 'touch.usePressed',
+} as const;
+type TouchEdgeId = keyof typeof TOUCH_EDGE_KEYS;
+
 export class LevelScene extends Phaser.Scene {
   // ── konfiguracja poziomu ────────────────────────────────────────────────
   private levelId = '1-1';
@@ -196,6 +214,18 @@ export class LevelScene extends Phaser.Scene {
   private lastTimerEmit = -1;
   private dragonHits = 0;
 
+  // ── BOSS (aneks 8.4.3) ──────────────────────────────────────────────────
+  private vabank: Phaser.GameObjects.Sprite | null = null;
+  private vabankHopY = { v: 0 };
+  private vabankBubble: Phaser.GameObjects.Container | null = null;
+  private vabankBubbleT = 0;
+  private weakMark: Phaser.GameObjects.Text | null = null;
+  private bossTeleStrip: Phaser.GameObjects.Rectangle | null = null;
+  private shockSprites: Phaser.GameObjects.Image[] = [];
+  private waveSprites: Phaser.GameObjects.Image[] = [];
+  private boulderSprites: Phaser.GameObjects.Image[] = [];
+  private bossPlatformsSpawned = false;
+
   // ── runner (faza RUNNER — core/runnerPattern steruje) ───────────────────
   private rn: RunnerState | null = null;
   private rnSim: SimState | null = null;
@@ -215,6 +245,15 @@ export class LevelScene extends Phaser.Scene {
   private gateCont: Phaser.GameObjects.Container | null = null;
   private gateGlow: Phaser.GameObjects.Rectangle | null = null;
   private gateOpening = false;
+  /** ponowienie toastu bramy, gdy gracz tkwi pod zamkniętą bramą > 3 s */
+  private gateBlockedT = 0;
+
+  // ── dotyk (kontrakt registry — nagłówek TouchControls.ts) ───────────────
+  private touchLast: Record<TouchEdgeId, number> = { jump: 0, shoot: 0, magic: 0, use: 0 };
+  private touchFrame: TouchFrame = {
+    left: false, right: false, down: false,
+    jump: false, shoot: false, magic: false, use: false,
+  };
 
   // ── efekty ──────────────────────────────────────────────────────────────
   private emDust!: Phaser.GameObjects.Particles.ParticleEmitter;
@@ -226,6 +265,7 @@ export class LevelScene extends Phaser.Scene {
   private emBoom!: Phaser.GameObjects.Particles.ParticleEmitter;
   private emSmoke!: Phaser.GameObjects.Particles.ParticleEmitter;
   private emGeyser!: Phaser.GameObjects.Particles.ParticleEmitter;
+  private emConfetti!: Phaser.GameObjects.Particles.ParticleEmitter;
   private musicWorld: Phaser.Sound.BaseSound | null = null;
   private musicDragon: Phaser.Sound.BaseSound | null = null;
 
@@ -301,9 +341,22 @@ export class LevelScene extends Phaser.Scene {
     if (this.scene.isActive('HUD') || this.scene.isPaused('HUD')) this.scene.stop('HUD');
     this.scene.launch('HUD', { levelKey: 'Level' });
 
+    // nakładka dotykowa (PRD 7) — jak w Menu; wejście dev-paramem ją pomija
+    if (!this.scene.isActive('TouchControls')) this.scene.launch('TouchControls');
+    this.readTouch();   // sync liczników edge (bez stale-naciśnięć po restarcie)
+
+    // dev: ?magic=3 → strzały magiczne od startu (e2e bossa)
+    const qMagic = devParam('magic');
+    if (qMagic) {
+      const v = parseInt(qMagic, 10);
+      if (Number.isFinite(v)) this.magic = Math.max(0, Math.min(MAGIC_MAX, v));
+    }
+
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.musicWorld?.stop();
       this.musicDragon?.stop();
+      this.game.registry.set('touch.runnerMode', false);
+      this.game.registry.set('touch.ctxUse', false);
     });
 
     this.time.delayedCall(150, () => {
@@ -390,6 +443,21 @@ export class LevelScene extends Phaser.Scene {
     this.dragonWarn = false;
     this.lastTimerEmit = -1;
     this.dragonHits = 0;
+    this.vabank = null;
+    this.vabankHopY = { v: 0 };
+    this.vabankBubble = null;
+    this.vabankBubbleT = 0;
+    this.weakMark = null;
+    this.bossTeleStrip = null;
+    this.shockSprites = [];
+    this.waveSprites = [];
+    this.boulderSprites = [];
+    this.bossPlatformsSpawned = false;
+    this.gateBlockedT = 0;
+    this.touchFrame = {
+      left: false, right: false, down: false,
+      jump: false, shoot: false, magic: false, use: false,
+    };
     this.warnT = 0;
     this.musicWorld = null;
     this.musicDragon = null;
@@ -835,6 +903,15 @@ export class LevelScene extends Phaser.Scene {
       tint: [0xff8030, 0xffd23f, 0xff5020],
       blendMode: Phaser.BlendModes.ADD, emitting: false,
     }).setDepth(6);
+    // konfetti 'p-star' — zwycięstwo nad BOSSEM (PRD 5.4: więcej particles);
+    // depth NAD nakładką zwycięstwa (200) — feta widoczna też na overlayu
+    this.emConfetti = this.add.particles(0, 0, 'p-star', {
+      speed: { min: 60, max: 240 }, gravityY: 160,
+      lifespan: { min: 700, max: 1500 }, rotate: { start: 0, end: 360 },
+      scale: { start: 1.35, end: 0.25 }, alpha: { start: 1, end: 0 },
+      tint: [COLN.gold, 0xff8ac9, COLN.cyan, 0xffffff],
+      emitting: false,
+    }).setDepth(250);
   }
 
   private buildWarnArrow(): void {
@@ -858,9 +935,51 @@ export class LevelScene extends Phaser.Scene {
     this.keys = kb.addKeys('A,D,S,W,X,Z,E,P,M,ESC') as LevelScene['keys'];
   }
 
+  /**
+   * Odczyt stanu dotyku z registry (kontrakt w TouchControls.ts) — raz na
+   * klatkę. Liczniki *Pressed: wzrost od ostatniej wartości = JustDown.
+   * Liczniki są konsumowane zawsze (nawet gdy nakładka nieaktywna), żeby po
+   * powrocie nie odpalić zaległych naciśnięć.
+   */
+  private readTouch(): TouchFrame {
+    const reg = this.game.registry;
+    const f: TouchFrame = {
+      left: false, right: false, down: false,
+      jump: false, shoot: false, magic: false, use: false,
+    };
+    for (const id of Object.keys(TOUCH_EDGE_KEYS) as TouchEdgeId[]) {
+      const raw = reg.get(TOUCH_EDGE_KEYS[id]);
+      const v = typeof raw === 'number' ? raw : 0;
+      if (v > this.touchLast[id]) f[id] = true;
+      this.touchLast[id] = v;
+    }
+    if (reg.get('touch.active') === true) {
+      f.left = reg.get('touch.left') === true;
+      f.right = reg.get('touch.right') === true;
+      f.down = reg.get('touch.down') === true;
+    }
+    this.touchFrame = f;
+    return f;
+  }
+
+  /** Level → TouchControls: tryb runnera (przycisk ŚLIZG) i kontekstowe E */
+  private syncTouchContext(): void {
+    const reg = this.game.registry;
+    const runnerMode = this.phase === 'RUNNER';
+    if (reg.get('touch.runnerMode') !== runnerMode) {
+      reg.set('touch.runnerMode', runnerMode);
+    }
+    // E robi coś: placek w plecaku + (Echo do ściągnięcia albo brak serca)
+    const ctxUse = !runnerMode && !!this.player && this.hasCake
+      && (this.hearts < this.maxHearts
+        || (this.echoE?.logic.canRetameWithCake(this.player.cx) ?? false));
+    if (reg.get('touch.ctxUse') !== ctxUse) reg.set('touch.ctxUse', ctxUse);
+  }
+
   private setupMusic(): void {
     this.sound.stopByKey('music-menu');
-    const key = `music-world${this.world}`;
+    // BOSS: 'music-boss' przez cały poziom (PRD 6) — bez crossfade'u w arenie
+    const key = this.def.kind === 'BOSS' ? 'music-boss' : `music-world${this.world}`;
     if (this.cache.audio.exists(key)) {
       this.musicWorld = this.sound.add(key, { loop: true, volume: 0.5 });
       this.musicWorld.play();
@@ -885,9 +1004,13 @@ export class LevelScene extends Phaser.Scene {
     if (text) this.events.emit('hud:toast', { text, ms });
   }
 
+  private hudLabel(): string {
+    return this.def.kind === 'BOSS' ? 'OBSYDIAN' : `ŚWIAT ${this.levelId}`;
+  }
+
   private emitHud(): void {
     this.events.emit('hud:state', {
-      levelLabel: `ŚWIAT ${this.levelId}`,
+      levelLabel: this.hudLabel(),
       hearts: this.hearts, maxHearts: this.maxHearts, lives: this.lives,
       crystals: this.crystals, crystalTotal: this.map.crystalTotal,
       arrows: this.arrows, magic: this.magic, diamonds: this.diamondsTotal,
@@ -897,7 +1020,7 @@ export class LevelScene extends Phaser.Scene {
   /** stan dla HUD/Pauzy (wołane bezpośrednio przy starcie nakładek) */
   getHudState() {
     return {
-      levelLabel: `ŚWIAT ${this.levelId}`,
+      levelLabel: this.hudLabel(),
       hearts: this.hearts, maxHearts: this.maxHearts, lives: this.lives,
       crystals: this.crystals, crystalTotal: this.map.crystalTotal,
       arrows: this.arrows, magic: this.magic, diamonds: this.diamondsTotal,
@@ -984,6 +1107,11 @@ export class LevelScene extends Phaser.Scene {
 
     this.levelTime += dt;
 
+    // dotyk (PRD 7): registry z TouchControls czytane RAZ na klatkę,
+    // łączone z klawiaturą przez OR; kontekst przycisków w drugą stronę
+    const touch = this.readTouch();
+    this.syncTouchContext();
+
     // ── faza RUNNER: core/runnerPattern + physicsSim, scena renderuje ────
     if (this.phase === 'RUNNER') {
       this.updateRunner(dt);
@@ -991,18 +1119,19 @@ export class LevelScene extends Phaser.Scene {
     }
 
     // ── gracz ────────────────────────────────────────────────────────────
-    const left = this.cursors.left.isDown || this.keys.A.isDown;
-    const right = this.cursors.right.isDown || this.keys.D.isDown;
+    const left = this.cursors.left.isDown || this.keys.A.isDown || touch.left;
+    const right = this.cursors.right.isDown || this.keys.D.isDown || touch.right;
     const move: -1 | 0 | 1 = left && !right ? -1 : right && !left ? 1 : 0;
     const jumpPressed = Phaser.Input.Keyboard.JustDown(this.cursors.space)
       || Phaser.Input.Keyboard.JustDown(this.cursors.up)
-      || Phaser.Input.Keyboard.JustDown(this.keys.W);
-    const downHeld = this.cursors.down.isDown || this.keys.S.isDown;
+      || Phaser.Input.Keyboard.JustDown(this.keys.W)
+      || touch.jump;
+    const downHeld = this.cursors.down.isDown || this.keys.S.isDown || touch.down;
     this.player.update(dt, { move, jumpPressed, downHeld });
 
-    if (Phaser.Input.Keyboard.JustDown(this.keys.X)) this.shoot(false);
-    if (Phaser.Input.Keyboard.JustDown(this.keys.Z)) this.shoot(true);
-    if (Phaser.Input.Keyboard.JustDown(this.keys.E)) this.useCake();
+    if (Phaser.Input.Keyboard.JustDown(this.keys.X) || touch.shoot) this.shoot(false);
+    if (Phaser.Input.Keyboard.JustDown(this.keys.Z) || touch.magic) this.shoot(true);
+    if (Phaser.Input.Keyboard.JustDown(this.keys.E) || touch.use) this.useCake();
 
     // upadek poza mapę
     if (this.player.body.y > FIELD_H + 24) {
@@ -1024,8 +1153,9 @@ export class LevelScene extends Phaser.Scene {
 
     if (this.phase === 'PLATFORM') {
       this.updateThief(dt);
-      // trigger areny
-      if (this.map.trigger && this.def.kind === 'ARENA'
+      // trigger areny (typ B i BOSS)
+      if (this.map.trigger
+        && (this.def.kind === 'ARENA' || this.def.kind === 'BOSS')
         && this.player.cx >= this.map.trigger.x) {
         this.startArena(false);
       }
@@ -1042,11 +1172,17 @@ export class LevelScene extends Phaser.Scene {
 
     devMark({
       scene: 'Level', level: this.levelId, phase: this.phase,
-      playerX: Math.round(this.player.cx), crystals: this.crystals,
+      playerX: Math.round(this.player.cx),
+      playerY: Math.round(this.player.body.y),
+      crystals: this.crystals,
       thiefActive: !!this.thiefE, thiefX: this.thiefE ? Math.round(this.thiefE.logic.x) : -1,
       dragonState: this.combat?.dragon.state ?? '',
       dragonX: this.combat ? Math.round(this.combat.dragon.x) : -1,
       dragonHits: this.dragonHits,
+      dragonHp: this.combat?.dragon.hp ?? -1,
+      bossPhase: this.combat?.dragon.pattern === 'boss' ? this.combat.dragon.phase : 0,
+      shieldUp: this.combat?.dragon.shieldUp ?? false,
+      p2Platforms: this.bossPlatformsSpawned,
     });
   }
 
@@ -1558,18 +1694,24 @@ export class LevelScene extends Phaser.Scene {
   Phaser.GameObjects.Container {
     const cont = this.add.container(0, 0).setScrollFactor(0).setDepth(200);
     const dim = this.add.rectangle(320, FIELD_H / 2, 640, FIELD_H, 0x0b0b14, 0.62);
-    const box = this.add.nineslice(320, FIELD_H / 2, 'ui-panel-brown', undefined, 340, 150, 6, 6, 6, 6);
-    cont.add([dim, box]);
     let y = FIELD_H / 2 - 42;
+    let maxW = 0;
+    const texts: Phaser.GameObjects.Text[] = [];
     for (const l of lines) {
       const t = this.add.text(320, y, l.text, {
         fontFamily: l.size >= 14 ? FONT_TITLE : FONT_UI,
         fontSize: `${l.size}px`, color: l.color,
         stroke: COL.ink, strokeThickness: 3,
       }).setOrigin(0.5);
-      cont.add(t);
+      texts.push(t);
+      maxW = Math.max(maxW, t.width);
       y += l.size + 16;
     }
+    const boxW = Math.min(620, Math.max(340, maxW + 44));
+    const boxH = Math.max(150, y - (FIELD_H / 2 - 42) + 64);
+    const box = this.add.nineslice(320, FIELD_H / 2, 'ui-panel-brown', undefined,
+      boxW, boxH, 6, 6, 6, 6);
+    cont.add([dim, box, ...texts]);
     return cont;
   }
 
@@ -1582,15 +1724,19 @@ export class LevelScene extends Phaser.Scene {
       { text: msg.line, size: 15, color: COL.white },
       { text: '► [SPACJA] ◄', size: 13, color: COL.dim },
     ]);
+    let done = false;
     const go = () => {
+      if (done) return;   // auto-timer + zaległy listener nie respawnują 2×
+      done = true;
+      timer.remove();
+      this.input.keyboard!.off('keydown-SPACE', go);
+      this.input.off('pointerdown', go);
       cont.destroy();
       this.respawnAfterDeath();
     };
     const timer = this.time.delayedCall(2000, go);
-    this.input.keyboard!.once('keydown-SPACE', () => {
-      timer.remove();
-      go();
-    });
+    this.input.keyboard!.once('keydown-SPACE', go);
+    this.input.once('pointerdown', go);   // dotyk: tap = dalej (PRD 7)
   }
 
   private gameOverOverlay(): void {
@@ -1601,16 +1747,21 @@ export class LevelScene extends Phaser.Scene {
       { text: GAME_OVER.line, size: 15, color: COL.white },
       { text: `${GAME_OVER.button}  [SPACJA]`, size: 14, color: COL.cyan },
     ]);
-    this.input.keyboard!.once('keydown-SPACE', () => {
+    const back = () => {
+      this.input.keyboard!.off('keydown-SPACE', back);
+      this.input.off('pointerdown', back);
       cont.destroy();
       this.scene.stop('HUD');
       this.scene.start('Menu');
-    });
+    };
+    this.input.keyboard!.once('keydown-SPACE', back);
+    this.input.once('pointerdown', back);   // dotyk: tap = dalej (PRD 7)
   }
 
   private respawnAfterDeath(): void {
     this.physics.world.resume();
     this.frozen = false;
+    this.readTouch();   // konsumpcja naciśnięć dotyku z czasu nakładki śmierci
     if (this.phase === 'RUNNER') {
       // reset sekcji od początku, prędkość startowa (aneks 8.3)
       this.runnerSectionReset();
@@ -1989,6 +2140,7 @@ export class LevelScene extends Phaser.Scene {
   private enterArena(arenaX0: number, instant: boolean): void {
     if (!this.def.dragon) return;
     this.phase = 'ARENA';
+    const isBoss = this.def.kind === 'BOSS';
     // combat core — checkpoint z zachowanym HP przy kolejnych wejściach
     if (!this.combat) {
       const oPts = this.map.oPoints.map((o) => ({ x: o.x + 8, y: o.y + 8 }));
@@ -1996,8 +2148,19 @@ export class LevelScene extends Phaser.Scene {
         this.map.dragonSpawn
           ? { spawnPos: { x: this.map.dragonSpawn.x, y: this.map.dragonSpawn.y } }
           : {});
+      // dev: ?dhp=12 → HP smoka od startu (e2e faz bossa)
+      const qHp = devParam('dhp');
+      if (qHp) {
+        const v = parseInt(qHp, 10);
+        if (Number.isFinite(v) && v > 0 && v <= this.combat.dragon.maxHp) {
+          this.combat.dragon.hp = v;
+        }
+      }
     }
-    this.dragonE = new DragonEntity(this, this.def.dragon.toLowerCase());
+    // Obsydian: skala ×1,85 + złote rogi + przygaszony tint (czerń+złoto)
+    this.dragonE = new DragonEntity(this, this.def.dragon.toLowerCase(),
+      isBoss ? { scale: 1.85, horns: true, baseTint: 0x8a8098 } : {});
+    if (isBoss) this.buildVabank();
     // pooling fireballi
     for (let i = 0; i < 8; i++) {
       const s = this.add.image(0, 0, 'p-circle-big')
@@ -2027,28 +2190,139 @@ export class LevelScene extends Phaser.Scene {
         onComplete: lock,
       });
     }
-    // crossfade muzyki 0,5 s + ryk Miraża
-    if (this.musicWorld) {
-      this.tweens.add({
-        targets: this.musicWorld, volume: 0, duration: 500,
-        onComplete: () => this.musicWorld?.stop(),
-      });
-    }
-    if (this.cache.audio.exists('music-dragon')) {
-      this.musicDragon = this.sound.add('music-dragon', { loop: true, volume: 0 });
-      this.musicDragon.play();
-      this.tweens.add({ targets: this.musicDragon, volume: 0.55, duration: 500 });
+    // crossfade muzyki 0,5 s + ryk (BOSS: 'music-boss' gra od startu poziomu)
+    if (!isBoss) {
+      if (this.musicWorld) {
+        this.tweens.add({
+          targets: this.musicWorld, volume: 0, duration: 500,
+          onComplete: () => this.musicWorld?.stop(),
+        });
+      }
+      if (this.cache.audio.exists('music-dragon')) {
+        this.musicDragon = this.sound.add('music-dragon', { loop: true, volume: 0 });
+        this.musicDragon.play();
+        this.tweens.add({ targets: this.musicDragon, volume: 0.55, duration: 500 });
+      }
     }
     this.dragonE.playRoar();
-    this.sfx('sfx-dragon-roar', 0.7);
-    cam.shake(350, 0.007);
+    this.sfx('sfx-dragon-roar', isBoss ? 0.85 : 0.7);
+    cam.shake(isBoss ? 500 : 350, isBoss ? 0.01 : 0.007);
     const name = DRAGONS[this.def.dragon].name;
     this.events.emit('hud:arena', {
       name, hp: this.combat.dragon.hp, maxHp: this.combat.dragon.maxHp,
       portraitKey: `dragon-${this.def.dragon.toLowerCase()}`,
     });
-    this.toast(`Smok ${name}! Uważaj na ogień, strzelaj [X]!`, 2600);
+    this.toast(isBoss
+      ? 'Obsydian, Król Smoków! Zbij tarczę i strzelaj!'
+      : `Smok ${name}! Uważaj na ogień, strzelaj [X]!`, 2600);
     this.emitHud();
+  }
+
+  // ── BOSS: Vabank na łbie + dymki (aneks 8.4.3, Załącznik A) ─────────────
+
+  private buildVabank(): void {
+    this.vabank = this.add.sprite(0, -40, 'vabank-idle', 0)
+      .setOrigin(0.5, 1).setScale(1.25).setDepth(-8);
+    this.vabank.play('vabank-idle');
+  }
+
+  /** podskok Vabanka przy zmianie fazy (siedzi na łbie — dekoracja) */
+  private vabankHop(): void {
+    this.vabankHopY = { v: 0 };
+    this.tweens.add({
+      targets: this.vabankHopY, v: 16, duration: 170, yoyo: true, repeat: 1,
+      ease: 'Sine.out',
+    });
+  }
+
+  private vabankSay(text: string): void {
+    this.vabankBubble?.destroy();
+    const bubble = this.add.container(0, 0).setDepth(40);
+    const label = this.add.text(0, 0, text, {
+      fontFamily: FONT_UI, fontSize: '13px', color: COL.ink,
+      wordWrap: { width: 220 },
+    }).setOrigin(0.5);
+    const panel = this.add.nineslice(0, 0, 'ui-panel', undefined,
+      Math.min(244, label.width + 22), label.height + 14, 6, 6, 6, 6);
+    const tail = this.add.triangle(0, panel.height / 2 + 5, 0, 0, 10, 0, 5, 7, 0xffffff)
+      .setAlpha(0.95);
+    bubble.add([panel, tail, label]);
+    this.vabankBubble = bubble;
+    this.vabankBubbleT = 3.5;
+    devMark({ taunt: text });
+  }
+
+  /** pozycja Vabanka + dymka + znacznika słabego punktu (co klatkę areny) */
+  private updateBossDecor(dt: number): void {
+    if (!this.combat || !this.dragonE) return;
+    const d = this.combat.dragon;
+    if (this.vabank && d.state !== 'GONE') {
+      const r = this.dragonE.riderXY(d, this.player.cx);
+      this.vabank.setPosition(r.x, r.y - this.vabankHopY.v);
+      this.vabank.setFlipX(this.player.cx < d.x + d.w / 2);
+    }
+    if (this.vabankBubble) {
+      this.vabankBubbleT -= dt;
+      if (this.vabankBubbleT <= 0) {
+        this.vabankBubble.destroy();
+        this.vabankBubble = null;
+      } else if (this.vabank) {
+        this.vabankBubble.setPosition(
+          Phaser.Math.Clamp(this.vabank.x,
+            this.cameras.main.scrollX + 130, this.cameras.main.scrollX + 510),
+          Math.max(this.cameras.main.scrollY + 30, this.vabank.y - 74),
+        );
+        this.vabankBubble.setAlpha(this.vabankBubbleT < 0.5 ? this.vabankBubbleT * 2 : 1);
+      }
+    }
+    // słaby punkt po szarży: ♦ miga na sprite (magiczna ×2 — core wie)
+    if (d.pattern === 'boss') {
+      if (!this.weakMark) {
+        this.weakMark = this.add.text(0, 0, '♦', {
+          fontFamily: FONT_TITLE, fontSize: '14px', color: COL.white,
+          stroke: COL.ink, strokeThickness: 4,
+        }).setOrigin(0.5).setDepth(21).setVisible(false);
+      }
+      const show = d.weak > 0 && d.aliveFighting()
+        && Math.floor(this.time.now / 120) % 2 === 0;
+      this.weakMark.setVisible(show);
+      if (show) this.weakMark.setPosition(d.x + d.w / 2, d.y + d.h / 2 - 4);
+    }
+  }
+
+  /** Faza 2 „Pogoń": 3 znikające platformy (BOSS_P2_PLATFORMS, v1 przesuwa
+   *  o arena_x0 − 60) — z nich strzela się do latającego smoka */
+  private spawnBossPlatforms(): void {
+    if (this.bossPlatformsSpawned) return;
+    this.bossPlatformsSpawned = true;
+    const shift = (this.def.arenaX ?? 60) - 60;
+    for (const [r, c0raw, len] of BOSS_P2_PLATFORMS) {
+      const c0 = c0raw + shift;
+      const c1 = c0 + len - 1;
+      const seg: VanishSegment = {
+        r, c0, c1, x: c0 * TILE, y: r * TILE, widthPx: len * TILE,
+      };
+      const rect = this.add
+        .rectangle(seg.x + seg.widthPx / 2, seg.y + 8, seg.widthPx, TILE)
+        .setVisible(false);
+      this.physics.add.existing(rect, true);
+      const images: Phaser.GameObjects.Sprite[] = [];
+      for (let i = 0; i < Math.ceil(seg.widthPx / 32); i++) {
+        const s = this.add
+          .sprite(seg.x + i * 32 + 16, seg.y + 6, 'platform-falling', 0)
+          .setDepth(-45).setScale(0);
+        s.play({ key: 'platform-falling-on', startFrame: i % 4 });
+        this.tweens.add({
+          targets: s, scale: 1, duration: 260, delay: i * 60, ease: 'Back.out',
+        });
+        images.push(s);
+      }
+      for (let c = seg.c0; c <= seg.c1; c++) this.extraSolid.add(cellKey(seg.r, c));
+      this.vanishE.push({ seg, state: 'idle', t: 0, images, rect });
+      this.physics.add.collider(this.player.carrier, rect);
+      this.emSpark.explode(10, seg.x + seg.widthPx / 2, seg.y + 8);
+    }
+    this.toast('Znikające platformy! Wskakuj i strzelaj do smoka!', 2600);
   }
 
   private updateArena(dt: number): void {
@@ -2106,6 +2380,9 @@ export class LevelScene extends Phaser.Scene {
     }
     // zionięcie Piry: pas ziemi płonie (core liczy c0..c1 — 9 kolumn)
     this.renderGroundFlames();
+    // BOSS: pociski faz (fala ognia, głaz, fala uderzeniowa) + dekoracje
+    this.renderBossProjectiles();
+    this.updateBossDecor(dt);
     // telegraf ataku naziemnego: pas ziemi pod graczem miga (aneks 8.4.1)
     const d = this.combat.dragon;
     const flameTele = d.state === 'TELEGRAPH' && d.pattern === 'pira'
@@ -2120,11 +2397,120 @@ export class LevelScene extends Phaser.Scene {
     } else {
       this.flameShimmer?.setVisible(false);
     }
-    // timer ucieczki w HUD (+ ostrzeżenie 30 s)
-    const remaining = Math.max(0, Math.ceil(this.diff.dragonFlee - this.combat.arenaTime));
-    if (remaining !== this.lastTimerEmit) {
-      this.lastTimerEmit = remaining;
-      this.events.emit('hud:timer', { remaining, warning: remaining <= 30 });
+    // BOSS telegraf flame/charge: pas `~` przy ziemi przez całą arenę (v1)
+    const bossTele = d.pattern === 'boss' && d.state === 'TELEGRAPH'
+      && (d.telegraphKind === 'flame' || d.telegraphKind === 'charge');
+    if (bossTele) {
+      if (!this.bossTeleStrip) {
+        this.bossTeleStrip = this.add
+          .rectangle(0, 0, 80 * TILE, 5, 0xffa040, 0.55)
+          .setBlendMode(Phaser.BlendModes.ADD).setDepth(-39);
+      }
+      this.bossTeleStrip
+        .setVisible(Math.floor(this.time.now / 110) % 2 === 0)
+        .setPosition(this.combat.rect.x0 + 40 * TILE, 19 * TILE - 4);
+    } else {
+      this.bossTeleStrip?.setVisible(false);
+    }
+    // timer ucieczki w HUD (+ ostrzeżenie 30 s) — BOSS bez timera (8.4.3)
+    if (d.pattern !== 'boss') {
+      const remaining = Math.max(0, Math.ceil(this.diff.dragonFlee - this.combat.arenaTime));
+      if (remaining !== this.lastTimerEmit) {
+        this.lastTimerEmit = remaining;
+        this.events.emit('hud:timer', { remaining, warning: remaining <= 30 });
+      }
+    }
+  }
+
+  /** BOSS: sync pooli sprite'ów z core (fale ognia, głazy, fale uderzeniowe)
+   *  + kolizje z graczem (w arenie trafienie = −1 serce) */
+  private renderBossProjectiles(): void {
+    if (!this.combat) return;
+    const pb = this.player.body;
+    const canHurt = this.player.iframes <= 0 && !this.frozen;
+    // pozioma fala ognia przy ziemi (faza 1 atak A — przeskok)
+    const waves = this.combat.flamewaves;
+    while (this.waveSprites.length < waves.length) {
+      this.waveSprites.push(
+        this.add.image(0, 0, 'p-circle-big').setTint(0xff7020)
+          .setBlendMode(Phaser.BlendModes.ADD).setDepth(6).setVisible(false),
+      );
+    }
+    for (let i = 0; i < this.waveSprites.length; i++) {
+      const s = this.waveSprites[i];
+      const fw = waves[i];
+      if (!fw || !fw.alive) {
+        s.setVisible(false);
+        continue;
+      }
+      const y = 18 * TILE + 4;
+      s.setVisible(true).setPosition(fw.x, y)
+        .setScale(1.0 + 0.15 * Math.sin(this.time.now / 50 + i), 1.55);
+      this.emFire.emitParticleAt(fw.x - fw.dir * 10, y + Phaser.Math.Between(-8, 6), 1);
+      if (canHurt
+        && fw.x + 10 > pb.x && fw.x - 10 < pb.x + pb.width
+        && pb.y + pb.height > 17 * TILE) {
+        fw.alive = false;
+        s.setVisible(false);
+        this.hurtPlayer(fw.x);
+      }
+    }
+    // głaz O nad kolumną gracza (faza 1 atak B)
+    const boulders = this.combat.bossBoulders;
+    while (this.boulderSprites.length < boulders.length) {
+      this.boulderSprites.push(
+        this.add.image(0, 0, 'boulder').setDisplaySize(20, 20)
+          .setDepth(6).setVisible(false),
+      );
+    }
+    for (let i = 0; i < this.boulderSprites.length; i++) {
+      const s = this.boulderSprites[i];
+      const bb = boulders[i];
+      if (!bb || !bb.alive) {
+        if (s.visible && bb && !bb.alive) {
+          this.emDust.explode(8, s.x, 19 * TILE);
+          this.cameras.main.shake(90, 0.004);
+        }
+        s.setVisible(false);
+        continue;
+      }
+      s.setVisible(true).setPosition(bb.x, bb.y)
+        .setRotation(this.time.now / 180);
+      if (canHurt
+        && bb.x + 9 > pb.x && bb.x - 9 < pb.x + pb.width
+        && bb.y + 9 > pb.y && bb.y - 9 < pb.y + pb.height) {
+        bb.alive = false;
+        s.setVisible(false);
+        this.hurtPlayer(bb.x);
+      }
+    }
+    // fala uderzeniowa ^ po ziemi w obie strony (faza 3 po szarży — przeskok)
+    const shocks = this.combat.shocks;
+    while (this.shockSprites.length < shocks.length) {
+      this.shockSprites.push(
+        this.add.image(0, 0, 'p-circle-small').setTint(COLN.gold)
+          .setBlendMode(Phaser.BlendModes.ADD).setDepth(6).setVisible(false),
+      );
+    }
+    for (let i = 0; i < this.shockSprites.length; i++) {
+      const s = this.shockSprites[i];
+      const sh = shocks[i];
+      if (!sh || !sh.alive) {
+        s.setVisible(false);
+        continue;
+      }
+      const y = 18.6 * TILE;
+      s.setVisible(true).setPosition(sh.x, y).setScale(1.6, 0.8);
+      if (Math.floor(this.time.now / 70) % 2 === 0) {
+        this.emDust.explode(1, sh.x - sh.dir * 6, 19 * TILE);
+      }
+      if (canHurt
+        && sh.x + 8 > pb.x && sh.x - 8 < pb.x + pb.width
+        && pb.y + pb.height > 18.1 * TILE) {
+        sh.alive = false;
+        s.setVisible(false);
+        this.hurtPlayer(sh.x);
+      }
     }
   }
 
@@ -2219,6 +2605,18 @@ export class LevelScene extends Phaser.Scene {
           this.dragonE.warnBlink(false);
           this.toast(EVENT_MESSAGES.dragonFlees, 2600);
           break;
+        case 'phase': {
+          // zmiana fazy bossa: flash + shake + ryk + docinka Vabanka (aneks A)
+          const cam = this.cameras.main;
+          cam.flash(160, 255, 200, 80);
+          cam.shake(380, 0.012);
+          this.dragonE.playRoar();
+          this.sfx('sfx-dragon-roar', 0.8);
+          this.vabankHop();
+          this.vabankSay(ev.phase === 2 ? VABANK_TAUNTS.phase2 : VABANK_TAUNTS.phase3);
+          if (ev.phase === 2) this.spawnBossPlatforms();   // v1: tylko ph 2
+          break;
+        }
         case 'fled':
           this.onDragonFled();
           break;
@@ -2226,6 +2624,12 @@ export class LevelScene extends Phaser.Scene {
           this.dragonWarn = false;
           this.dragonE.warnBlink(false);
           this.slowmo();
+          // BOSS: kamera dojeżdża do konającego smoka (eksplozja w kadrze)
+          if (d.pattern === 'boss') {
+            const cam = this.cameras.main;
+            cam.stopFollow();
+            cam.pan(d.x + d.w / 2, FIELD_H / 2, 900, 'Sine.easeInOut');
+          }
           break;
         case 'defeated':
           this.onDragonDefeated();
@@ -2264,27 +2668,60 @@ export class LevelScene extends Phaser.Scene {
     if (!this.combat || !this.dragonE || !this.def.dragon) return;
     this.phase = 'VICTORY';
     const d = this.combat.dragon;
+    const isBoss = d.pattern === 'boss';
     const cx = d.x + d.w / 2;
     const cy = d.y + d.h / 2;
     this.dragonE.hide();
-    this.emBoom.explode(46, cx, cy);
-    this.emSpark.explode(24, cx, cy);
-    this.addScore(SCORE.dragon, cx, cy - 10);
+    this.emBoom.explode(isBoss ? 80 : 46, cx, cy);
+    this.emSpark.explode(isBoss ? 44 : 24, cx, cy);
+    this.addScore(isBoss ? SCORE.boss : SCORE.dragon, cx, cy - 10);
     this.sfx('sfx-fanfare', 0.7);
     this.musicDragon?.stop();
+    if (isBoss) this.musicWorld?.stop();   // BOSS: musicWorld = 'music-boss'
     if (this.cache.audio.exists('music-victory')) {
       this.sound.play('music-victory', { volume: 0.55 });
     }
     this.events.emit('hud:arena-end');
+    if (isBoss) {
+      // finał: większy rozpad + konfetti 'p-star' + salwy przez całą arenę
+      this.cameras.main.shake(600, 0.012);
+      this.cameras.main.flash(260, 255, 214, 90);
+      this.emConfetti.explode(56, cx, cy - 30);
+      for (let i = 1; i <= 7; i++) {
+        this.time.delayedCall(i * 340, () => {
+          const bx = this.cameras.main.scrollX + 80 + Math.random() * 480;
+          const by = 50 + Math.random() * 140;
+          this.emConfetti.explode(32, bx, by);
+          this.emSpark.explode(16, bx, by);
+        });
+      }
+      // Vabank spada z łba na ziemię (walka skończona, docinka w overlayu)
+      if (this.vabank) {
+        this.tweens.add({
+          targets: this.vabank, y: 19 * TILE, x: this.vabank.x + 26,
+          duration: 700, ease: 'Bounce.out',
+        });
+      }
+    }
     const name = DRAGONS[this.def.dragon].name;
-    const msg = WIN_MESSAGES[0];
-    const cont = this.overlayBox([
-      { text: `${name} WOLNY!`, size: 15, color: COL.gold },
-      { text: msg, size: 15, color: COL.white },
-    ]);
-    this.time.delayedCall(2400, () => {
-      cont.destroy();
-      this.levelComplete(true);
+    const lines = isBoss
+      ? [
+        { text: `${name} WOLNY! CZAR PĘKŁ!`, size: 15, color: COL.gold },
+        { text: WIN_MESSAGES[0], size: 15, color: COL.white },
+        { text: VABANK_TAUNTS.afterFight, size: 13, color: COL.purple },
+      ]
+      : [
+        { text: `${name} WOLNY!`, size: 15, color: COL.gold },
+        { text: WIN_MESSAGES[0], size: 15, color: COL.white },
+      ];
+    // BOSS: najpierw sekunda czystej eksplozji + konfetti, potem nakładka
+    const overlayDelay = isBoss ? 1000 : 0;
+    this.time.delayedCall(overlayDelay, () => {
+      const cont = this.overlayBox(lines);
+      this.time.delayedCall(isBoss ? 3400 : 2400, () => {
+        cont.destroy();
+        this.levelComplete(true);
+      });
     });
   }
 
@@ -2389,11 +2826,13 @@ export class LevelScene extends Phaser.Scene {
 
     if (!this.gateOpening) rn.update(dt);
 
-    // input: skok edge-triggered, ślizg trzymany (aneks 8.1/8.3)
+    // input: skok edge-triggered, ślizg trzymany (aneks 8.1/8.3) + dotyk (OR)
+    const touch = this.touchFrame;
     const jumpPressed = Phaser.Input.Keyboard.JustDown(this.cursors.space)
       || Phaser.Input.Keyboard.JustDown(this.cursors.up)
-      || Phaser.Input.Keyboard.JustDown(this.keys.W);
-    const down = this.cursors.down.isDown || this.keys.S.isDown;
+      || Phaser.Input.Keyboard.JustDown(this.keys.W)
+      || touch.jump;
+    const down = this.cursors.down.isDown || this.keys.S.isDown || touch.down;
     const absX = rn.traveled + RUNNER_PLAYER_X;
     const env: SimEnv = {
       groundYAt: () => {
@@ -2418,8 +2857,8 @@ export class LevelScene extends Phaser.Scene {
     }
 
     // strzały (Machacz 1 HP; kaktus połyka strzałę — core/runnerArrowHit)
-    if (Phaser.Input.Keyboard.JustDown(this.keys.X)) this.runnerShoot(false);
-    if (Phaser.Input.Keyboard.JustDown(this.keys.Z)) this.runnerShoot(true);
+    if (Phaser.Input.Keyboard.JustDown(this.keys.X) || touch.shoot) this.runnerShoot(false);
+    if (Phaser.Input.Keyboard.JustDown(this.keys.Z) || touch.magic) this.runnerShoot(true);
     this.updateRunnerArrows(dt);
 
     // zbiórki (core) + efekty na świeżo zebranych
@@ -2693,6 +3132,7 @@ export class LevelScene extends Phaser.Scene {
     const res = this.gateLogic.update(dt, this.crystals, need);
     if (res === 'open') {
       this.gateOpening = true;
+      this.gateBlockedT = 0;
       this.gateGlow?.setFillStyle(0x66ff88, 0.4);
       this.sfx('sfx-gate-open', 0.6);
       this.toast('Brama otwarta! Do bossa!', 2400);
@@ -2706,9 +3146,19 @@ export class LevelScene extends Phaser.Scene {
         this.levelComplete(false);
       }
     } else if (res === 'blockedMessage') {
+      this.gateBlockedT = 0;
       this.toast(EVENT_MESSAGES.gateNeedsCrystals, 2200);
       this.sfx('sfx-shield-clink', 0.5);
       this.gateGlow?.setFillStyle(0xff5a5a, 0.4);
+    } else if (res === 'blocked') {
+      // gracz tkwi pod zamkniętą bramą > 3 s → ponów toast (asekuracyjnie:
+      // core resetuje sekcję po 2,5 s jak v1, więc to siatka bezpieczeństwa
+      // na wypadek zmiany czasów w core — bez zmian w GateState)
+      this.gateBlockedT += dt;
+      if (this.gateBlockedT > 3) {
+        this.gateBlockedT = 0;
+        this.toast(EVENT_MESSAGES.gateNeedsCrystals, 2000);
+      }
     } else if (res === 'reset') {
       // za mało kryształów: powrót na start sekcji (v1) — snapshot wraca
       this.toast('Za mało kryształów — jeszcze raz po nie!', 2400);
@@ -2732,6 +3182,7 @@ export class LevelScene extends Phaser.Scene {
     rn.reset();
     this.rnFinished = false;
     this.gateOpening = false;
+    this.gateBlockedT = 0;
     this.gateGlow?.destroy();
     this.gateGlow = null;
     this.gateCont?.destroy();

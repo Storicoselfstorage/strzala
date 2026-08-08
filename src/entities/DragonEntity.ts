@@ -8,34 +8,54 @@ import Phaser from 'phaser';
 import { Dragon, DragonState } from '../core/combat';
 import { COL, COLN, FONT_TITLE } from '../ui/theme';
 
+export interface DragonEntityOpts {
+  /** skala sprite'a (BOSS: ×1,5–2 — PRD 5.3; hitbox ZAWSZE z core) */
+  scale?: number;
+  /** złote rogi Obsydiana — overlay dorysowany do głowy (v1: `^^`) */
+  horns?: boolean;
+  /** tint bazowy (Obsydian: przygaszenie recoloru do czerni+złota) */
+  baseTint?: number;
+}
+
+const BASE_SCALE = 1.35;
+
 export class DragonEntity {
   readonly sprite: Phaser.GameObjects.Sprite;
   private readonly glow: Phaser.GameObjects.Ellipse;
   private readonly shield: Phaser.GameObjects.Ellipse;
   private readonly bang: Phaser.GameObjects.Text;
+  private readonly horns: Phaser.GameObjects.Image[] = [];
   private readonly texKey: string;
   private readonly scene: Phaser.Scene;
+  private readonly scaleK: number;
+  private readonly baseTint: number;
   private hurtT = 0;
   private telegraphOn = false;
   private shieldPulse?: Phaser.Tweens.Tween;
 
-  constructor(scene: Phaser.Scene, dragonKey: string) {
+  constructor(scene: Phaser.Scene, dragonKey: string, opts: DragonEntityOpts = {}) {
     this.scene = scene;
     this.texKey = `dragon-${dragonKey}`;
+    const scale = opts.scale ?? BASE_SCALE;
+    this.scaleK = scale / BASE_SCALE;
+    this.baseTint = opts.baseTint ?? 0xffffff;
     // klatka 113×64, smok logicznie 96×48 → skala dobrana wizualnie
     this.sprite = scene.add
       .sprite(0, 0, this.texKey, 9)
       .setOrigin(0.5, 0.62)
-      .setScale(1.35)
+      .setScale(scale)
       .setDepth(-10);
+    if (this.baseTint !== 0xffffff) this.sprite.setTint(this.baseTint);
     this.glow = scene.add
-      .ellipse(0, 0, 116, 72, COLN.gold, 0.16)
+      .ellipse(0, 0, 116 * this.scaleK, 72 * this.scaleK, COLN.gold, 0.16)
       .setBlendMode(Phaser.BlendModes.ADD)
       .setDepth(-11)
       .setVisible(false);
+    // tarcza: przy dużym bossie ADD-owy owal robi się „jajem" — przygaś
     this.shield = scene.add
-      .ellipse(0, 0, 150, 96, 0x8ef6ff, 0.28)
-      .setStrokeStyle(2, 0xcffcff, 0.8)
+      .ellipse(0, 0, 150 * this.scaleK, 96 * this.scaleK, 0x8ef6ff,
+        this.scaleK > 1 ? 0.14 : 0.28)
+      .setStrokeStyle(2, 0xcffcff, this.scaleK > 1 ? 0.45 : 0.8)
       .setBlendMode(Phaser.BlendModes.ADD)
       .setDepth(-9)
       .setVisible(false);
@@ -47,6 +67,37 @@ export class DragonEntity {
       .setOrigin(0.5)
       .setDepth(20)
       .setVisible(false);
+    if (opts.horns) {
+      DragonEntity.ensureHornTexture(scene);
+      for (let i = 0; i < 2; i++) {
+        this.horns.push(
+          scene.add.image(0, 0, 'boss-horn').setOrigin(0.5, 1).setDepth(-9.5),
+        );
+      }
+    }
+  }
+
+  /** róg 12×10 px generowany Graphics (bez pliku — rekomendacja pipeline'u F0) */
+  private static ensureHornTexture(scene: Phaser.Scene): void {
+    if (scene.textures.exists('boss-horn')) return;
+    const g = scene.make.graphics({ x: 0, y: 0 }, false);
+    // złoty róg: ciemna podstawa, jaśniejszy trzon, rozświetlony czubek
+    g.fillStyle(0xb8860b, 1);
+    g.fillTriangle(0, 10, 12, 10, 7, 0);
+    g.fillStyle(0xffd23f, 1);
+    g.fillTriangle(2, 10, 10, 10, 7, 1);
+    g.fillStyle(0xfff2a0, 1);
+    g.fillTriangle(5, 5, 8, 5, 7, 0);
+    g.generateTexture('boss-horn', 12, 10);
+    g.destroy();
+  }
+
+  /** kotwica „jeźdźca" (Vabank siedzi na łbie — aneks 8.4.3) */
+  riderXY(d: Dragon, playerX: number): { x: number; y: number } {
+    const cx = d.x + d.w / 2;
+    const facing = playerX < cx ? -1 : 1;
+    const top = this.sprite.y - this.sprite.displayHeight * 0.62;
+    return { x: cx + facing * 6 * this.scaleK, y: top + 26 * this.scaleK };
   }
 
   /** pozycja pyska (do błysku wystrzału) */
@@ -73,6 +124,19 @@ export class DragonEntity {
     else if (st === 'ATTACK' || st === 'CHARGE') this.play('attack');
     else if (st === 'STUNNED') this.play('hurt');
     else if (st === 'FLEE') this.play('fly');
+
+    // złote rogi: zakotwiczone do głowy (przód sprite'a po stronie gracza),
+    // wygięte do tyłu jak korona — czerń+złoto (checklista B1)
+    if (this.horns.length > 0) {
+      const top = this.sprite.y - this.sprite.displayHeight * 0.62;
+      const hx = cx + facing * this.sprite.displayWidth * 0.26;
+      const hy = top + this.sprite.displayHeight * 0.34;
+      this.horns[0].setPosition(hx, hy).setFlipX(facing < 0)
+        .setScale(1.8).setRotation(-facing * 0.35).setVisible(this.sprite.visible);
+      this.horns[1].setPosition(hx - facing * 11, hy - 1).setFlipX(facing < 0)
+        .setScale(1.45).setRotation(-facing * 0.6).setVisible(this.sprite.visible);
+      for (const h of this.horns) h.setAlpha(this.sprite.alpha);
+    }
 
     // telegraf ≥ 0,7 s: poświata + miganie + `!` (PRD 5.5)
     const tele = st === 'TELEGRAPH';
@@ -143,7 +207,7 @@ export class DragonEntity {
   warnBlink(on: boolean): void {
     if (on) this.sprite.setTint(COLN.gold);
     else {
-      this.sprite.setTint(0xffffff);
+      this.sprite.setTint(this.baseTint);
       this.sprite.setTintMode(Phaser.TintModes.MULTIPLY);
     }
   }
@@ -153,6 +217,7 @@ export class DragonEntity {
     this.glow.setVisible(false);
     this.shield.setVisible(false);
     this.bang.setVisible(false);
+    for (const h of this.horns) h.setVisible(false);
     this.shieldPulse?.stop();
   }
 
@@ -162,5 +227,6 @@ export class DragonEntity {
     this.glow.destroy();
     this.shield.destroy();
     this.bang.destroy();
+    for (const h of this.horns) h.destroy();
   }
 }

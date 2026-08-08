@@ -271,6 +271,8 @@ export const SCORE = {
   crystal: 10, diamond: 100, arrowPack: 5, thief: 50, dragon: 500,
   boss: 1000, level: 100, timeBonusMult: 5,
 } as const;
+// UWAGA: aneks 6.3 podaje dla Machacza „+30 pkt", ale v1 (levels.py:231
+// ENEMY_SCORE) ma 20 — obowiązują dane v1 (jak przy ECONOMY_* poniżej).
 export const ENEMY_SCORE = { toczek: 20, machacz: 20, skoczka: 30 } as const;
 
 // ── Ekonomia — tabela 8.6 (Normalny) ───────────────────────────────────────

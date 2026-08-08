@@ -59,6 +59,12 @@ export class HUDScene extends Phaser.Scene {
   }
 
   create() {
+    // instancja sceny żyje przez cały czas gry — pola-tablice z poprzedniego
+    // uruchomienia trzymają ZNISZCZONE obiekty (regresja: zwiecha przy
+    // drugim starcie poziomu, e2e/repro-freeze.spec.ts)
+    this.hearts = [];
+    this.hpSegments = [];
+
     const level = this.scene.get(this.levelKey) as Phaser.Scene & {
       getHudState(): HudState;
     };

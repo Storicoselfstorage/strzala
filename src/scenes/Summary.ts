@@ -119,11 +119,12 @@ export class SummaryScene extends Phaser.Scene {
 
   /**
    * DALEJ (aneks 4.3): zawsze przez mapę świata; po 1-3/2-3 najpierw
-   * scenka przejściowa (raz), po BOSS finał → tabela wyników.
+   * scenka przejściowa (raz), po BOSS finał → Victory (feta + wpis imienia)
+   * → tabela wyników.
    */
   private routeNext(levelId: string): void {
     if (levelId === 'BOSS') {
-      this.scene.start('Interlude', { id: 'finale', next: 'Scores' });
+      this.scene.start('Interlude', { id: 'finale', next: 'Victory' });
       return;
     }
     const interludeId = levelId === '1-3' ? 'after-1-3'

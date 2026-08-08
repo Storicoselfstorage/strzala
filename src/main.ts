@@ -11,6 +11,7 @@ import { LevelScene } from './scenes/Level';
 import { HUDScene } from './scenes/HUD';
 import { PauseScene } from './scenes/Pause';
 import { SummaryScene } from './scenes/Summary';
+import { VictoryScene } from './scenes/Victory';
 import { ScoresScene } from './scenes/Scores';
 import { CreditsScene } from './scenes/Credits';
 import { TouchControlsScene } from './ui/TouchControls';
@@ -18,7 +19,7 @@ import { TouchControlsScene } from './ui/TouchControls';
 export const GAME_WIDTH = 640;
 export const GAME_HEIGHT = 360;
 
-new Phaser.Game({
+const game = new Phaser.Game({
   type: Phaser.AUTO,
   parent: 'game',
   width: GAME_WIDTH,
@@ -41,6 +42,11 @@ new Phaser.Game({
     BootScene, PreloadScene, SplashScene, MenuScene,
     CharSelectScene, DiffSelectScene, WorldMapScene, InterludeScene,
     LevelScene, HUDScene, PauseScene, SummaryScene,
-    ScoresScene, CreditsScene, TouchControlsScene,
+    VictoryScene, ScoresScene, CreditsScene, TouchControlsScene,
   ],
 });
+
+// uchwyt diagnostyczny dla e2e — tylko dev, build produkcyjny go nie zawiera
+if (import.meta.env.DEV) {
+  (window as unknown as { __game?: Phaser.Game }).__game = game;
+}
