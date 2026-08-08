@@ -1,0 +1,9 @@
+node_modules/
+dist/
+raw-assets/
+.env
+.env.*
+.DS_Store
+e2e/screenshots/
+test-results/
+playwright-report/
