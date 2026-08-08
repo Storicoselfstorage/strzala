@@ -22,9 +22,15 @@ export class CharSelectScene extends Phaser.Scene {
   private backdrop!: Backdrop;
   private cards: Card[] = [];
   private selected = 0;
+  private returnTo: string | null = null;
 
   constructor() {
     super('CharSelect');
+  }
+
+  /** returnTo: zmiana bohaterki z mapy świata wraca na mapę */
+  init(data: { returnTo?: string }) {
+    this.returnTo = data?.returnTo ?? null;
   }
 
   create() {
@@ -150,7 +156,7 @@ export class CharSelectScene extends Phaser.Scene {
       writeSave(st, save);
     }
     this.sound.play('sfx-ui-click', { volume: 0.5 });
-    this.scene.start('DiffSelect');
+    this.scene.start(this.returnTo ?? 'DiffSelect');
   }
 
   update(_t: number, delta: number) {

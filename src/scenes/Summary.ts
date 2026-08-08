@@ -1,10 +1,12 @@
 /**
  * Podsumowanie poziomu: gwiazdki (ukończenie / komplet kryształów / bez strat),
  * liczniki nabijane od zera, WIN_MESSAGES; zapis postępu przez core/save.ts.
- * Dalej → Level 1-2 (po 1-1) albo Menu (koniec wycinka po 1-2).
+ * DALEJ → mapa świata (aneks 4.3); po 1-3 i 2-3 najpierw scenka przejścia,
+ * po BOSS finał → tabela wyników. BOSS odblokowuje się dopiero po 3-3
+ * + komplet 5 smoków (aneks 4.2).
  */
 import Phaser from 'phaser';
-import { loadSave, localStorageAdapter, writeSave } from '../core/save';
+import { loadSave, localStorageAdapter, SaveData, writeSave } from '../core/save';
 import { LEVEL_ORDER, DRAGONS, DragonId } from '../data/levels';
 import { WIN_MESSAGES } from '../data/texts';
 import { addSkyBackdrop, Backdrop, COL, FONT_TITLE, FONT_UI } from '../ui/theme';
@@ -99,24 +101,15 @@ export class SummaryScene extends Phaser.Scene {
       }).setOrigin(0.5);
     }
 
-    const next = this.nextLevelId();
-    const prompt = this.add.text(320, 296,
-      next ? '► [SPACJA] dalej ◄' : '► [SPACJA] menu ◄', {
-        fontFamily: FONT_UI, fontSize: '15px', color: COL.cyan,
-        stroke: COL.ink, strokeThickness: 3,
-      }).setOrigin(0.5);
+    const prompt = this.add.text(320, 296, '► [SPACJA] dalej ◄', {
+      fontFamily: FONT_UI, fontSize: '15px', color: COL.cyan,
+      stroke: COL.ink, strokeThickness: 3,
+    }).setOrigin(0.5);
     this.tweens.add({ targets: prompt, alpha: 0.35, duration: 500, yoyo: true, repeat: -1 });
 
     const go = () => {
       this.sound.stopByKey('music-victory');
-      if (next) {
-        this.scene.start('Level', { levelId: next });
-      } else {
-        if (this.cache.audio.exists('music-menu') && !this.sound.get('music-menu')?.isPlaying) {
-          this.sound.play('music-menu', { loop: true, volume: 0.6 });
-        }
-        this.scene.start('Menu');
-      }
+      this.routeNext(d.levelId);
     };
     this.input.keyboard!.once('keydown-SPACE', go);
     this.input.keyboard!.once('keydown-ENTER', go);
@@ -124,10 +117,33 @@ export class SummaryScene extends Phaser.Scene {
     devMark({ scene: 'Summary', level: d.levelId, stars: d.stars });
   }
 
-  /** wycinek B1: dalej tylko z 1-1 do 1-2 */
-  private nextLevelId(): string | null {
-    if (this.data_.levelId === '1-1') return '1-2';
-    return null;
+  /**
+   * DALEJ (aneks 4.3): zawsze przez mapę świata; po 1-3/2-3 najpierw
+   * scenka przejściowa (raz), po BOSS finał → tabela wyników.
+   */
+  private routeNext(levelId: string): void {
+    if (levelId === 'BOSS') {
+      this.scene.start('Interlude', { id: 'finale', next: 'Scores' });
+      return;
+    }
+    const interludeId = levelId === '1-3' ? 'after-1-3'
+      : levelId === '2-3' ? 'after-2-3' : null;
+    if (interludeId) {
+      const st = localStorageAdapter();
+      const seen = st ? loadSave(st).interludes_seen.includes(interludeId) : false;
+      if (!seen) {
+        this.scene.start('Interlude', { id: interludeId, next: 'WorldMap' });
+        return;
+      }
+    }
+    this.scene.start('WorldMap');
+  }
+
+  /** aneks 4.2: BOSS wymaga ukończonego 3-3 ORAZ 5 pokonanych smoków */
+  private bossUnlockable(save: SaveData): boolean {
+    const dragonLevels = ['1-2', '1-3', '2-2', '2-3', '3-2'];
+    return save.levels['3-3']?.completed === true
+      && dragonLevels.every((l) => save.dragons_defeated.includes(l));
   }
 
   private saveProgress(d: SummaryData): void {
@@ -136,7 +152,7 @@ export class SummaryScene extends Phaser.Scene {
     const save = loadSave(st);
     const idx = LEVEL_ORDER.indexOf(d.levelId as typeof LEVEL_ORDER[number]);
     const next = idx >= 0 && idx + 1 < LEVEL_ORDER.length ? LEVEL_ORDER[idx + 1] : null;
-    if (next && !save.unlocked.includes(next)) save.unlocked.push(next);
+    if (next && next !== 'BOSS' && !save.unlocked.includes(next)) save.unlocked.push(next);
     const prev = save.levels[d.levelId];
     save.levels[d.levelId] = {
       completed: true,
@@ -147,6 +163,11 @@ export class SummaryScene extends Phaser.Scene {
     };
     if (d.dragonDefeated && !save.dragons_defeated.includes(d.levelId)) {
       save.dragons_defeated.push(d.levelId);
+    }
+    // BOSS: warunek z aneksu 4.2 sprawdzany po KAŻDYM ukończeniu (także
+    // powtórce poziomu ze smokiem, który wcześniej uciekł)
+    if (this.bossUnlockable(save) && !save.unlocked.includes('BOSS')) {
+      save.unlocked.push('BOSS');
     }
     // bank plecaka (aneks 8.5)
     save.total_diamonds = d.diamondsTotal;

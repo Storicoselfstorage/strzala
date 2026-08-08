@@ -92,13 +92,20 @@ export class DiffSelectScene extends Phaser.Scene {
   private confirm(): void {
     const id = OPTIONS[this.selected].id;
     const st = localStorageAdapter();
+    let introSeen = false;
     if (st) {
       const save = loadSave(st);
       save.difficulty = id;
       writeSave(st, save);
+      introSeen = save.interludes_seen.includes('intro');
     }
     this.sound.play('sfx-ui-click', { volume: 0.5 });
-    this.scene.start('Level', { levelId: '1-1' });
+    // przepływ 4.3: świeży profil → scenka intro, potem mapa świata
+    if (introSeen) {
+      this.scene.start('WorldMap');
+    } else {
+      this.scene.start('Interlude', { id: 'intro', next: 'WorldMap' });
+    }
   }
 
   update(_t: number, delta: number) {

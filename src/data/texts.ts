@@ -80,3 +80,55 @@ export const GAME_OVER = {
   line: 'Smok już wie, że po niego idziesz.',
   button: '↺ JESZCZE RAZ',
 } as const;
+
+// ── Autorzy (ekran AUTORZY) — przepisane z CREDITS.md ─────────────────────
+export interface CreditEntry {
+  name: string;
+  author: string;
+  license: string;
+}
+
+export interface CreditSection {
+  header: string;
+  entries: CreditEntry[];
+}
+
+export const CREDITS_DATA: CreditSection[] = [
+  {
+    header: 'GRAFIKA',
+    entries: [
+      { name: 'Pixel Adventure 1 i 2', author: 'PixelFrog', license: 'CC0' },
+      { name: 'Treasure Hunters', author: 'PixelFrog', license: 'CC0' },
+      { name: 'Huntress (Vega)', author: 'LuizMelo', license: 'CC0' },
+      { name: 'Ranger Girl (Tosia)', author: 't3chdev', license: 'darmowa' },
+      { name: 'Free Pixel Art Dragons (smoki)', author: 'Magicae Games', license: 'darmowa' },
+      { name: 'Jungle Monkey Platformer (Echo)', author: 'PixelSym', license: 'darmowa' },
+      { name: 'UI Pack Pixel Adventure', author: 'Kenney', license: 'CC0' },
+      { name: 'Particle Pack', author: 'Kenney', license: 'CC0' },
+    ],
+  },
+  {
+    header: 'DŹWIĘK',
+    entries: [
+      { name: '512 Sound Effects (8-bit)', author: 'Juhani Junkala', license: 'CC0' },
+      { name: '5 Chiptunes: Action', author: 'Juhani Junkala', license: 'CC0' },
+      { name: '4 Chiptunes: Adventure', author: 'Juhani Junkala', license: 'CC0' },
+    ],
+  },
+  {
+    header: 'FONTY',
+    entries: [
+      { name: 'Pixelify Sans', author: 'Google Fonts', license: 'SIL OFL 1.1' },
+      { name: 'Press Start 2P', author: 'Google Fonts', license: 'SIL OFL 1.1' },
+    ],
+  },
+  {
+    header: 'KOD I SILNIK',
+    entries: [
+      { name: 'Phaser 4', author: 'Phaser Studio', license: 'MIT' },
+      { name: 'STRZA/ŁA: Łowczynie Smoków', author: 'projekt rodzinny', license: '♥' },
+    ],
+  },
+];
+
+export const CREDITS_THANKS = 'Dziękujemy autorom darmowych paczek!';

@@ -24,6 +24,9 @@ interface Dev {
   dragonX?: number;
   dragonHits?: number;
   pauseOpened?: boolean;
+  interludeId?: string;
+  selected?: string;
+  touchVisible?: boolean;
 }
 
 declare global {
@@ -54,7 +57,20 @@ async function waitScene(page: Page, scene: string, timeout = 20_000): Promise<v
   );
 }
 
-/** splash → menu → charselect (Tosia) → diffselect (NORMALNY) → Level */
+/** przewiń scenkę fabularną: SPACJA aż scena przestanie być Interlude */
+async function skipInterlude(page: Page): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const scene = await page.evaluate(() => window.__strzala?.scene);
+    if (scene !== 'Interlude') return;
+    await page.keyboard.press('Space');
+    await page.waitForTimeout(120);
+  }
+  throw new Error('Interlude nie zakończyło się w czasie');
+}
+
+/** splash → menu → charselect (Tosia) → diffselect (NORMALNY) →
+ *  intro (świeży profil) → mapa świata → Level */
 async function keyboardIntoLevel(page: Page, query = ''): Promise<void> {
   await page.goto(`./${query}`);
   await expect(page.locator('#game canvas')).toBeVisible({ timeout: 15_000 });
@@ -66,6 +82,10 @@ async function keyboardIntoLevel(page: Page, query = ''): Promise<void> {
   await waitScene(page, 'CharSelect');
   await page.keyboard.press('Space');
   await waitScene(page, 'DiffSelect');
+  await page.keyboard.press('Space');
+  await waitScene(page, 'Interlude');
+  await skipInterlude(page);
+  await waitScene(page, 'WorldMap');
   await page.keyboard.press('Space');
   await waitScene(page, 'Level');
 }
