@@ -1,5 +1,8 @@
 import Phaser from 'phaser';
 import { BootScene } from './scenes/Boot';
+import { PreloadScene } from './scenes/Preload';
+import { SplashScene } from './scenes/Splash';
+import { MenuScene } from './scenes/Menu';
 
 export const GAME_WIDTH = 640;
 export const GAME_HEIGHT = 360;
@@ -23,5 +26,5 @@ new Phaser.Game({
       debug: false,
     },
   },
-  scene: [BootScene],
+  scene: [BootScene, PreloadScene, SplashScene, MenuScene],
 });
