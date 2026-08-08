@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { devMark } from '../dev';
 
 export class SplashScene extends Phaser.Scene {
   private layers: Array<{ sprite: Phaser.GameObjects.TileSprite; speed: number }> = [];
@@ -70,6 +71,7 @@ export class SplashScene extends Phaser.Scene {
     };
     this.input.once('pointerdown', begin);
     this.input.keyboard?.once('keydown', begin);
+    devMark({ scene: 'Splash' });
   }
 
   update(_time: number, delta: number) {
