@@ -1,10 +1,10 @@
 /**
- * Level — fazy PLATFORM i ARENA (pionowy wycinek: 1-1, 1-2).
+ * Level — fazy PLATFORM, ARENA i RUNNER (F3/F4: wszystkie światy).
  *
  * Zasada architektury (PRD 2.0 §10): logika decyzyjna w core/ (thief, monkey,
- * combat, mapParser) — ta scena buduje świat z ParsedMap, renderuje i woła core.
- * Hitboksy z balance; pooling pocisków i particles; localStorage tylko przez
- * core/save.ts.
+ * combat, runnerPattern, physicsSim, mapParser) — ta scena buduje świat
+ * z ParsedMap/RunnerState, renderuje i woła core. Hitboksy z balance;
+ * pooling pocisków i particles; localStorage tylko przez core/save.ts.
  */
 import Phaser from 'phaser';
 import {
@@ -12,16 +12,31 @@ import {
   CHARACTERS, DIFFICULTY, DifficultyId, DifficultySettings, HURT_KNOCKBACK,
   MAGIC_MAX, MAGIC_PER_CRYSTALS, PICKUP_RADIUS, SCORE, ENEMY_SCORE, TILE,
   ECHO_MAGNET_R, TRAP_TELEGRAPH,
+  BOULDER_FALL_SPEED, BOULDER_HIDDEN_TIME, BOULDER_LIE_TIME, BOULDER_TELEGRAPH,
+  ENEMY_DROP_CHANCE, GEYSER_CYCLE, GEYSER_REST, GEYSER_WARN,
+  PLAYER_H, POWERUP_MAGNET_R, POWERUP_MAGNET_TIME, POWERUP_SHIELD_TIME,
+  RUNNER_GROUND_Y, RUNNER_PLAYER_X, VANISH_BLINK_TIME, VANISH_GONE_TIME,
 } from '../core/balance';
-import { cellKey, ParsedMap, parseMap, solidAt, standRow, sealWallCells } from '../core/mapParser';
-import { ArenaCombat, CombatEvent, Fireball } from '../core/combat';
+import {
+  cellKey, ParsedMap, parseMap, PickupKind, solidAt, standRow, sealWallCells,
+  VanishSegment,
+} from '../core/mapParser';
+import { ArenaCombat, CombatEvent, Fireball, GroundFlame } from '../core/combat';
 import { ThiefSpawner } from '../core/thief';
 import { pickTrapsToActivate, recordLifeLoss } from '../core/monkey';
 import { loadSave, localStorageAdapter, SaveData, writeSave } from '../core/save';
-import { LEVEL_DEF, LevelDef, MAPS, THIEF_MAX, DRAGONS } from '../data/levels';
+import {
+  checkObstacleHit, collectRunnerPickups, GateState, gateRequirement,
+  runnerArrowHit, RunnerState,
+} from '../core/runnerPattern';
+import { createSim, SimEnv, simStep, SimState } from '../core/physicsSim';
+import {
+  LEVEL_DEF, LevelDef, MAPS, RUNNER_PATTERNS, THIEF_MAX, DRAGONS,
+} from '../data/levels';
 import { EVENT_MESSAGES, GAME_OVER, LEVEL_INTROS, LOSS_MESSAGES, WIN_MESSAGES } from '../data/texts';
 import { Player } from '../entities/Player';
-import { Toczek, Skoczka } from '../entities/enemies';
+import { Toczek, Skoczka, Machacz, ToczekSkin } from '../entities/enemies';
+import { RunnerPlayerView } from '../entities/RunnerPlayer';
 import { ThiefEntity } from '../entities/ThiefEntity';
 import { EchoEntity } from '../entities/EchoEntity';
 import { DragonEntity } from '../entities/DragonEntity';
@@ -31,10 +46,24 @@ import { devMark, devParam } from '../dev';
 const GAME_FIELD_Y = 40;    // wiersz HUD 40 px NAD polem gry 320 px
 const FIELD_H = 320;
 
-type Phase = 'PLATFORM' | 'ARENA' | 'VICTORY';
+/** tint wariantów świata 3 (aneks 6.3: ognisty nietoperz / lawowa żabka) */
+const WORLD3_ENEMY_TINT = 0xffa080;
+
+/**
+ * Meta 3-3 (czysty sprint bez areny): syntetyczna mapa pod fazę po runnerze
+ * (parser wymaga P i E; brama bossa zastępuje wyjście — E poza zasięgiem
+ * do chwili otwarcia bramy, poziom kończy levelComplete() po bramie).
+ */
+const RUNNER_FINISH_MAP: string[] = [
+  ...Array.from({ length: 18 }, () => ''),
+  '          P                                                           E   ',
+  '================================================================================',
+];
+
+type Phase = 'PLATFORM' | 'ARENA' | 'RUNNER' | 'VICTORY';
 
 interface PickupEntity {
-  kind: 'crystal' | 'diamond' | 'arrow' | 'cake' | 'heart';
+  kind: PickupKind;
   x: number; y: number;
   sprite: Phaser.GameObjects.Sprite | Phaser.GameObjects.Image;
   taken: boolean;
@@ -62,10 +91,41 @@ interface LootDrop {
   sprite: Phaser.GameObjects.Image;
 }
 
+/** gejzer (aneks 6.4): cykl 4 s = spoczynek 2 → bulgot 1 → erupcja 1 */
+interface GeyserEntity {
+  c: number; x: number; baseY: number;
+  state: 'rest' | 'warn' | 'erupt';
+  sprite: Phaser.GameObjects.Image;
+}
+
+/** głaz Rock Head (aneks 6.4): telegraf trzęsienia 0,8 s → spada 20 w/s */
+interface BoulderEntity {
+  x: number; y0: number; y: number;
+  /** y (px środka), na którym głaz ląduje (pierwszy solid pod spawnem) */
+  restY: number;
+  state: 'armed' | 'telegraph' | 'fall' | 'lie' | 'hidden';
+  t: number;
+  sprite: Phaser.GameObjects.Image;
+  bang: Phaser.GameObjects.Text;
+}
+
+/** znikająca platforma / most z lian (aneks 6.4): miga 1,2 s → znika 2 s */
+interface VanishEntity {
+  seg: VanishSegment;
+  state: 'idle' | 'blink' | 'gone';
+  t: number;
+  images: Phaser.GameObjects.Sprite[];
+  rect: Phaser.GameObjects.Rectangle;
+}
+
+/** power-up (aneks 7): aktywny maks. 1, nowy nadpisuje */
+interface PowerupState { kind: 'shield' | 'magnet'; t: number; total: number }
+
 export class LevelScene extends Phaser.Scene {
   // ── konfiguracja poziomu ────────────────────────────────────────────────
   private levelId = '1-1';
   private def!: LevelDef;
+  private world: 1 | 2 | 3 = 1;
   private map!: ParsedMap;
   private save!: SaveData;
   private charId!: CharacterId;
@@ -105,6 +165,14 @@ export class LevelScene extends Phaser.Scene {
   private hazardXs: number[] = [];
   private snails: Toczek[] = [];
   private bunnies: Skoczka[] = [];
+  private machacze: Machacz[] = [];
+  private machaczFired: boolean[] = [];
+  private geysers: GeyserEntity[] = [];
+  private bouldersE: BoulderEntity[] = [];
+  private vanishE: VanishEntity[] = [];
+  private lavaCells = new Set<number>();
+  private powerup: PowerupState | null = null;
+  private powerupBar: Phaser.GameObjects.Rectangle | null = null;
   private echoE: EchoEntity | null = null;
   private thiefE: ThiefEntity | null = null;
   private thiefSpawner = new ThiefSpawner();
@@ -120,11 +188,33 @@ export class LevelScene extends Phaser.Scene {
   private dragonE: DragonEntity | null = null;
   private fireballSprites: Phaser.GameObjects.Image[] = [];
   private shieldPickupSprites: Phaser.GameObjects.Sprite[] = [];
+  private flameRects: Phaser.GameObjects.Rectangle[] = [];
+  private flameShimmer: Phaser.GameObjects.Rectangle | null = null;
   private checkpointX = 0;
   private checkpointFeetY = 304;
   private dragonWarn = false;
   private lastTimerEmit = -1;
   private dragonHits = 0;
+
+  // ── runner (faza RUNNER — core/runnerPattern steruje) ───────────────────
+  private rn: RunnerState | null = null;
+  private rnSim: SimState | null = null;
+  private rnView: RunnerPlayerView | null = null;
+  private rnGround: Phaser.GameObjects.Image[] = [];
+  private rnObSprites: Phaser.GameObjects.Sprite[] = [];
+  private rnObDead: boolean[] = [];
+  private rnCrystalSprites: Phaser.GameObjects.Sprite[] = [];
+  private rnArrowSprites: Phaser.GameObjects.Image[] = [];
+  private rnChaser: Phaser.GameObjects.Sprite | null = null;
+  private rnChaserT = 0;
+  private rnObSeen: boolean[] = [];
+  private rnFinished = false;
+  private rnWasGround = true;
+  private rnLastProgress = -1;
+  private gateLogic: GateState | null = null;
+  private gateCont: Phaser.GameObjects.Container | null = null;
+  private gateGlow: Phaser.GameObjects.Rectangle | null = null;
+  private gateOpening = false;
 
   // ── efekty ──────────────────────────────────────────────────────────────
   private emDust!: Phaser.GameObjects.Particles.ParticleEmitter;
@@ -135,6 +225,7 @@ export class LevelScene extends Phaser.Scene {
   private emHitDot!: Phaser.GameObjects.Particles.ParticleEmitter;
   private emBoom!: Phaser.GameObjects.Particles.ParticleEmitter;
   private emSmoke!: Phaser.GameObjects.Particles.ParticleEmitter;
+  private emGeyser!: Phaser.GameObjects.Particles.ParticleEmitter;
   private musicWorld: Phaser.Sound.BaseSound | null = null;
   private musicDragon: Phaser.Sound.BaseSound | null = null;
 
@@ -149,7 +240,10 @@ export class LevelScene extends Phaser.Scene {
   init(data: { levelId?: string }) {
     this.levelId = data.levelId ?? '1-1';
     const qLevel = devParam('level');
-    if (qLevel && MAPS[qLevel]) this.levelId = qLevel;
+    if (qLevel && LEVEL_DEF[qLevel]
+      && (MAPS[qLevel] || LEVEL_DEF[qLevel].kind === 'RUNNER')) {
+      this.levelId = qLevel;
+    }
   }
 
   create() {
@@ -162,7 +256,16 @@ export class LevelScene extends Phaser.Scene {
     this.diff = DIFFICULTY[this.diffId];
     this.sound.mute = this.save.muted;
     this.def = LEVEL_DEF[this.levelId];
-    this.map = parseMap(MAPS[this.levelId], this.levelId);
+    this.world = this.def.world;
+    // runner: mapa fazy po sekcji (arena 1-3/2-3 albo meta 3-3)
+    const isRunner = this.def.kind === 'RUNNER';
+    if (isRunner && this.def.arenaMap) {
+      this.map = parseMap(MAPS[this.def.arenaMap], this.def.arenaMap);
+    } else if (isRunner) {
+      this.map = parseMap(RUNNER_FINISH_MAP, `${this.levelId}-meta`);
+    } else {
+      this.map = parseMap(MAPS[this.levelId], this.levelId);
+    }
 
     this.lives = this.diff.lives[this.charId];
     this.maxHearts = this.diff.outHearts > 0 ? this.diff.outHearts : this.diff.arenaHearts[this.charId];
@@ -177,18 +280,22 @@ export class LevelScene extends Phaser.Scene {
 
     this.physics.world.setBounds(0, -512, this.map.widthPx, 4096);
     this.buildBackdrop();
-    this.buildTerrain();
-    this.buildPickups();
-    this.buildTraps();
-    this.buildEnemies();
-    this.buildEcho();
-    this.buildExit();
-    this.buildPlayer();
     this.buildParticles();
-    this.buildWarnArrow();
-    this.setupCamera();
     this.setupInput();
     this.setupMusic();
+
+    const arenaJump = !!devParam('arena');
+    if (isRunner && !(arenaJump && this.def.dragon)) {
+      this.phase = 'RUNNER';
+      this.buildRunner();
+    } else {
+      this.buildPlatformWorld();
+      if (this.levelId === '2-2') this.activateAllTraps();   // aneks 8.6: `!` aktywne od startu
+      if (isRunner) {
+        // dev: ?arena=1 na runnerze → prosto do areny smoka-uciekiniera
+        this.startRunnerArena();
+      }
+    }
 
     // HUD — osobna scena-nakładka (restartowana razem z Level)
     if (this.scene.isActive('HUD') || this.scene.isPaused('HUD')) this.scene.stop('HUD');
@@ -201,16 +308,41 @@ export class LevelScene extends Phaser.Scene {
 
     this.time.delayedCall(150, () => {
       if (this.phase === 'PLATFORM') this.toast(LEVEL_INTROS[this.levelId] ?? '', 2600);
+      else if (this.phase === 'RUNNER') {
+        this.toast(LEVEL_INTROS[this.levelId] ?? '', 2400);
+        this.time.delayedCall(2600, () => {
+          if (this.phase === 'RUNNER' && !this.frozen && !this.rnFinished) {
+            this.toast('► ► ►  PĘDZIMY!   [SPACJA]=skok  [↓]=ślizg', 2600);
+          }
+        });
+      }
     });
 
-    // dev: ?arena=1 → skok prosto do areny; ?thief=1 → złodziej od razu
+    // dev: ?arena=1 → skok prosto do areny (typ B); ?thief=1 → złodziej od razu
     if (devParam('thief')) this.levelTime = 25;
-    if (devParam('arena') && this.map.trigger) {
+    if (arenaJump && !isRunner && this.map.trigger) {
       const t = this.map.trigger;
       this.player.respawn(t.x + 24, (standRow(this.map, t.c) + 1) * TILE);
       this.startArena(true);
     }
     devMark({ scene: 'Level', level: this.levelId, phase: this.phase, dragonHits: 0 });
+  }
+
+  /** świat platformowy z ParsedMap (fazy PLATFORM/ARENA; też areny po runnerze) */
+  private buildPlatformWorld(): void {
+    this.buildTerrain();
+    this.buildPickups();
+    this.buildTraps();
+    this.buildEnemies();
+    this.buildGeysers();
+    this.buildBoulders();
+    this.buildVanish();
+    this.buildLava();
+    this.buildEcho();
+    this.buildExit();
+    this.buildPlayer();
+    this.buildWarnArrow();
+    this.setupCamera();
   }
 
   private resetSceneState(): void {
@@ -235,6 +367,14 @@ export class LevelScene extends Phaser.Scene {
     this.hazardXs = [];
     this.snails = [];
     this.bunnies = [];
+    this.machacze = [];
+    this.machaczFired = [];
+    this.geysers = [];
+    this.bouldersE = [];
+    this.vanishE = [];
+    this.lavaCells = new Set();
+    this.powerup = null;
+    this.powerupBar = null;
     this.echoE = null;
     this.thiefE = null;
     this.thiefSpawner = new ThiefSpawner();
@@ -245,34 +385,86 @@ export class LevelScene extends Phaser.Scene {
     this.dragonE = null;
     this.fireballSprites = [];
     this.shieldPickupSprites = [];
+    this.flameRects = [];
+    this.flameShimmer = null;
     this.dragonWarn = false;
     this.lastTimerEmit = -1;
     this.dragonHits = 0;
     this.warnT = 0;
     this.musicWorld = null;
     this.musicDragon = null;
+    this.rn = null;
+    this.rnSim = null;
+    this.rnView = null;
+    this.rnGround = [];
+    this.rnObSprites = [];
+    this.rnObDead = [];
+    this.rnCrystalSprites = [];
+    this.rnArrowSprites = [];
+    this.rnChaser = null;
+    this.rnChaserT = 0;
+    this.rnObSeen = [];
+    this.rnFinished = false;
+    this.rnWasGround = true;
+    this.rnLastProgress = -1;
+    this.gateLogic = null;
+    this.gateCont = null;
+    this.gateGlow = null;
+    this.gateOpening = false;
   }
 
   // ════════════════════════ BUDOWA ŚWIATA ════════════════════════════════
 
   private buildBackdrop(): void {
-    // niebo: okno źródła 90–128 px wygładzonego assetu (linia lawendowej
-    // poświaty pod HUD + czysty błękit) — strefa przejścia pasm (wiersze
-    // 79–89: dither + szarość) rozciągnięta na pół ekranu wygląda jak glitch
-    const sky = this.add.tileSprite(0, 0, 640, FIELD_H, 'world1-sky')
+    if (this.world === 1) {
+      // niebo: okno źródła 90–128 px wygładzonego assetu (linia lawendowej
+      // poświaty pod HUD + czysty błękit) — strefa przejścia pasm (wiersze
+      // 79–89: dither + szarość) rozciągnięta na pół ekranu wygląda jak glitch
+      const sky = this.add.tileSprite(0, 0, 640, FIELD_H, 'world1-sky')
+        .setOrigin(0, 0).setScrollFactor(0).setDepth(-100);
+      sky.tileScaleX = FIELD_H / 38;
+      sky.tileScaleY = FIELD_H / 38;
+      sky.tilePositionY = 90;
+      const small = this.add.tileSprite(0, 56, 640, 48, 'world1-clouds-small')
+        .setOrigin(0, 0).setScrollFactor(0).setDepth(-95);
+      const big = this.add.tileSprite(0, 148, 640, 101, 'world1-clouds-big')
+        .setOrigin(0, 0).setScrollFactor(0).setDepth(-90);
+      this.skyLayers = [
+        { ts: sky, factor: 0, drift: 0 },
+        { ts: big, factor: 0.2, drift: 3 },
+        { ts: small, factor: 0.45, drift: 7 },
+      ];
+      return;
+    }
+    // światy 2-3: pionowy gradient nieba + 2 warstwy sylwetek (scroll 0,2/0,45)
+    const skyKey = this.world === 2 ? 'world2-sky' : 'world3-sky';
+    const farKey = this.world === 2 ? 'world2-far' : 'world3-far';
+    const nearKey = this.world === 2 ? 'world2-near' : 'world3-near';
+    const farH = this.world === 2 ? 192 : 176;
+    const nearH = this.world === 2 ? 144 : 128;
+    const sky = this.add.tileSprite(0, 0, 640, FIELD_H, skyKey)
       .setOrigin(0, 0).setScrollFactor(0).setDepth(-100);
-    sky.tileScaleX = FIELD_H / 38;
-    sky.tileScaleY = FIELD_H / 38;
-    sky.tilePositionY = 90;
-    const small = this.add.tileSprite(0, 56, 640, 48, 'world1-clouds-small')
+    const far = this.add.tileSprite(0, FIELD_H - farH, 640, farH, farKey)
       .setOrigin(0, 0).setScrollFactor(0).setDepth(-95);
-    const big = this.add.tileSprite(0, 148, 640, 101, 'world1-clouds-big')
+    const near = this.add.tileSprite(0, FIELD_H - nearH, 640, nearH, nearKey)
       .setOrigin(0, 0).setScrollFactor(0).setDepth(-90);
     this.skyLayers = [
       { ts: sky, factor: 0, drift: 0 },
-      { ts: big, factor: 0.2, drift: 3 },
-      { ts: small, factor: 0.45, drift: 7 },
+      { ts: far, factor: 0.2, drift: this.world === 2 ? 1 : 0 },
+      { ts: near, factor: 0.45, drift: 0 },
     ];
+  }
+
+  /** tileset terenu per świat (ten sam układ 17×5 co terrain-sand) */
+  private terrainTex(): string {
+    return this.world === 1 ? 'terrain-sand'
+      : this.world === 2 ? 'terrain-jungle' : 'terrain-obsidian';
+  }
+
+  /** kaktus / kolczasty krzak / lawowy kaktus (aneks 6.4) */
+  private cactusTex(): string {
+    return this.world === 1 ? 'cactus-big'
+      : this.world === 2 ? 'cactus-bush-big' : 'cactus-lava-big';
   }
 
   /** autotiling 'terrain-sand' (siatka 17 kolumn; frame = wiersz·17 + kolumna) */
@@ -310,9 +502,10 @@ export class LevelScene extends Phaser.Scene {
   }
 
   private buildTerrain(): void {
+    const tex = this.terrainTex();
     // widoczne kafle
     for (const t of this.map.solidTiles) {
-      this.add.image(t.x + 8, t.y + 8, 'terrain-sand', this.sandFrame(t.r, t.c)).setDepth(-50);
+      this.add.image(t.x + 8, t.y + 8, tex, this.sandFrame(t.r, t.c)).setDepth(-50);
     }
     // scalone kolizje: poziome przebiegi kratek per wiersz → mało ciał statycznych
     for (let r = 0; r < this.map.heightTiles; r++) {
@@ -334,7 +527,7 @@ export class LevelScene extends Phaser.Scene {
     if (this.def.wallCol !== undefined && this.def.arenaX !== undefined) {
       for (const [r, c] of sealWallCells(this.def.wallCol)) {
         const img = this.add
-          .image(c * TILE + 8, r * TILE + 8, 'terrain-sand', 17 + 4)
+          .image(c * TILE + 8, r * TILE + 8, tex, 17 + 4)
           .setDepth(-49).setVisible(false);
         this.sealTiles.push(img);
         const rect = this.add.rectangle(c * TILE + 8, r * TILE + 8, TILE, TILE).setVisible(false);
@@ -348,25 +541,38 @@ export class LevelScene extends Phaser.Scene {
       (rWall.body as Phaser.Physics.Arcade.StaticBody).enable = false;
       this.sealRects.push(rWall);
     }
-    // dekoracje: palmy na wierzchołkach gruntu (deterministycznie co ~13 kolumn)
+    // dekoracje na wierzchołkach gruntu (deterministycznie co ~kilkanaście kolumn)
     let placed = 0;
     for (const t of this.map.solidTiles) {
       if (t.kind !== 'ground') continue;
       if (this.map.solidSet.has(cellKey(t.r - 1, t.c))) continue;
-      if (t.c % 13 !== 5) continue;
-      const frame = placed % 3 === 2 ? 4 : 0;
-      const palm = this.add.sprite(t.x + 8, t.y + 1, 'palms', frame)
-        .setOrigin(0.5, 1).setDepth(-60);
-      if (frame === 0) palm.play({ key: 'palm-sway', startFrame: placed % 4 });
-      placed++;
+      if (this.world === 1) {
+        // palmy (świat 1)
+        if (t.c % 13 !== 5) continue;
+        const frame = placed % 3 === 2 ? 4 : 0;
+        const palm = this.add.sprite(t.x + 8, t.y + 1, 'palms', frame)
+          .setOrigin(0.5, 1).setDepth(-60);
+        if (frame === 0) palm.play({ key: 'palm-sway', startFrame: placed % 4 });
+        placed++;
+      } else if (this.world === 3) {
+        // pochodnie (świat 3 — skarbiec/jaskinie)
+        if (t.c % 19 !== 7) continue;
+        const torch = this.add.sprite(t.x + 8, t.y + 1, 'torch', 0)
+          .setOrigin(0.5, 1).setDepth(-60);
+        torch.play({ key: 'torch-flame', startFrame: placed % 4 });
+        placed++;
+      }
+      // świat 2: klimat niosą warstwy tła (sylwetki palm, liany)
     }
-    // kaktusy i kolce (pułapki statyczne)
+    // kaktusy i kolce (pułapki statyczne) — wariant kaktusa per świat
+    const cactus = this.cactusTex();
     for (const k of this.map.cacti) {
-      this.add.image(k.x + 8, k.y + TILE, 'cactus-big').setOrigin(0.5, 1).setDepth(-40);
+      this.add.image(k.x + 8, k.y + TILE, cactus).setOrigin(0.5, 1).setDepth(-40);
       this.hazardXs.push(k.x + 8);
     }
     for (const s of this.map.spikes) {
-      this.add.image(s.x + 8, s.y + TILE, 'spikes').setOrigin(0.5, 1).setDepth(-40);
+      const img = this.add.image(s.x + 8, s.y + TILE, 'spikes').setOrigin(0.5, 1).setDepth(-40);
+      if (this.world === 3) img.setTint(WORLD3_ENEMY_TINT);
       this.hazardXs.push(s.x + 8);
     }
   }
@@ -378,12 +584,13 @@ export class LevelScene extends Phaser.Scene {
       case 'arrow': return { key: 'arrow' };
       case 'cake': return { key: 'placek' };
       case 'heart': return { key: 'heart-pickup' };
+      case 'pw_shield': return { key: 'powerup-shield' };
+      case 'pw_magnet': return { key: 'powerup-magnet' };
     }
   }
 
   private buildPickups(): void {
     for (const p of this.map.pickups) {
-      if (p.kind === 'pw_shield' || p.kind === 'pw_magnet') continue;  // brak w świecie 1
       const { key, anim } = this.pickupTexture(p.kind);
       const x = p.x + 8;
       const y = p.y + 8;
@@ -423,9 +630,97 @@ export class LevelScene extends Phaser.Scene {
   }
 
   private buildEnemies(): void {
+    // warianty na świat (aneks 6.3): Skorpionik / Żuk liściowy / Żar-żuk
+    const skin: ToczekSkin = this.world === 2 ? 'slime' : 'snail';
+    const toczekTint = this.world === 3 ? 0xff7050 : 0xffffff;
+    const tint = this.world === 3 ? WORLD3_ENEMY_TINT : 0xffffff;
     for (const e of this.map.enemies) {
-      if (e.kind === 'toczek') this.snails.push(new Toczek(this, e.r, e.c));
-      else this.bunnies.push(new Skoczka(this, e.r, e.c));
+      if (e.kind === 'toczek') this.snails.push(new Toczek(this, e.r, e.c, skin, toczekTint));
+      else this.bunnies.push(new Skoczka(this, e.r, e.c, tint));
+    }
+    this.machaczFired = this.map.machaczTriggers.map(() => false);
+  }
+
+  private buildGeysers(): void {
+    for (const g of this.map.geysers) {
+      const baseY = (g.r + 1) * TILE;
+      const sprite = this.add.image(g.x + 8, baseY + 1, 'geyser-base')
+        .setOrigin(0.5, 1).setDepth(-40);
+      this.geysers.push({ c: g.c, x: g.x + 8, baseY, state: 'rest', sprite });
+      this.hazardXs.push(g.x + 8);
+    }
+  }
+
+  private buildBoulders(): void {
+    for (const b of this.map.boulders) {
+      const x = b.x + 8;
+      const y0 = b.y + 8;
+      // punkt lądowania: głaz leży NA półce (solid tuż pod spawnem) i spada
+      // za nią w dół („nie zatrzymuj się pod półką" — aneks 6.4); ląduje na
+      // pierwszym solidzie poniżej półki (albo wpada w przepaść)
+      let restY = 20 * TILE + 40;
+      for (let rr = b.r + 2; rr < this.map.heightTiles; rr++) {
+        if (this.map.solidSet.has(cellKey(rr, b.c))) {
+          restY = rr * TILE - 10;
+          break;
+        }
+      }
+      const sprite = this.add.image(x, y0, 'boulder').setDepth(-35);
+      sprite.setDisplaySize(20, 20);
+      const bang = this.add.text(x, y0 - 18, '!', {
+        fontFamily: FONT_TITLE, fontSize: '14px', color: COL.danger,
+        stroke: COL.ink, strokeThickness: 4,
+      }).setOrigin(0.5).setDepth(20).setVisible(false);
+      this.bouldersE.push({ x, y0, y: y0, restY, state: 'armed', t: 0, sprite, bang });
+      this.hazardXs.push(x);
+    }
+  }
+
+  private buildVanish(): void {
+    const tex = this.world === 2 ? 'platform-liana' : 'platform-falling';
+    const anim = this.world === 2 ? 'platform-liana-on' : 'platform-falling-on';
+    for (const seg of this.map.vanish) {
+      const rect = this.add
+        .rectangle(seg.x + seg.widthPx / 2, seg.y + 8, seg.widthPx, TILE)
+        .setVisible(false);
+      this.physics.add.existing(rect, true);
+      const images: Phaser.GameObjects.Sprite[] = [];
+      for (let i = 0; i < Math.ceil(seg.widthPx / 32); i++) {
+        const s = this.add.sprite(seg.x + i * 32 + 16, seg.y + 6, tex, 0).setDepth(-45);
+        s.play({ key: anim, startFrame: i % 4 });
+        images.push(s);
+      }
+      for (let c = seg.c0; c <= seg.c1; c++) this.extraSolid.add(cellKey(seg.r, c));
+      this.vanishE.push({ seg, state: 'idle', t: 0, images, rect });
+    }
+  }
+
+  /** świat 3: pas lawy w przerwach dolnego wiersza (dotyk = jak kolce) */
+  private buildLava(): void {
+    if (this.world !== 3 || this.def.kind === 'BOSS') return;
+    const bottom = this.map.heightTiles - 1;   // wiersz 19
+    let c = 0;
+    while (c < this.map.widthTiles) {
+      if (this.map.solidSet.has(cellKey(bottom, c))) { c++; continue; }
+      const c0 = c;
+      while (c < this.map.widthTiles && !this.map.solidSet.has(cellKey(bottom, c))) c++;
+      const x0 = c0 * TILE;
+      const x1 = c * TILE;
+      const w = x1 - x0;
+      for (let cc = c0; cc < c; cc++) this.lavaCells.add(cellKey(bottom, cc));
+      // tafla: baza + jaśniejsza linia powierzchni + żar (particles, nie asset)
+      this.add.rectangle(x0 + w / 2, bottom * TILE + 11, w, 10, 0x7a1a10).setDepth(-46);
+      this.add.rectangle(x0 + w / 2, bottom * TILE + 5, w, 4, 0xff6a28, 0.95)
+        .setBlendMode(Phaser.BlendModes.ADD).setDepth(-46);
+      this.add.particles(0, 0, 'p-circle-small', {
+        x: { min: x0 + 4, max: x1 - 4 }, y: bottom * TILE + 6,
+        speedY: { min: -34, max: -10 }, speedX: { min: -6, max: 6 },
+        lifespan: { min: 400, max: 900 },
+        scale: { start: 0.5, end: 0 }, alpha: { start: 0.9, end: 0 },
+        tint: [0xff8030, 0xffd23f, 0xff4020],
+        blendMode: Phaser.BlendModes.ADD,
+        frequency: Math.max(60, 900 / (w / TILE)), quantity: 1,
+      }).setDepth(-44);
     }
   }
 
@@ -475,7 +770,13 @@ export class LevelScene extends Phaser.Scene {
     });
     this.physics.add.collider(this.player.carrier, this.solidRects);
     this.physics.add.collider(this.player.carrier, this.sealRects);
-    // pooling strzał: 12 sprite'ów tworzonych raz
+    this.physics.add.collider(this.player.carrier, this.vanishE.map((v) => v.rect));
+    this.ensureArrowPool();
+  }
+
+  /** pooling strzał: 12 sprite'ów tworzonych raz (wspólny dla faz) */
+  private ensureArrowPool(): void {
+    if (this.arrowPool.length > 0) return;
     for (let i = 0; i < 12; i++) {
       const s = this.add.image(0, 0, 'arrow').setDepth(5).setVisible(false);
       this.arrowPool.push({ sprite: s, vx: 0, traveled: 0, magic: false, alive: false });
@@ -526,6 +827,14 @@ export class LevelScene extends Phaser.Scene {
       scale: { start: 0.6, end: 0.1 }, alpha: { start: 0.7, end: 0 },
       tint: 0xbbaadd, emitting: false,
     }).setDepth(11);
+    // kolumna gejzeru (świat 3: żar; emitowana punktowo w updateGeysers)
+    this.emGeyser = this.add.particles(0, 0, 'p-circle-small', {
+      angle: { min: 255, max: 285 }, speed: { min: 90, max: 190 },
+      lifespan: { min: 250, max: 450 }, gravityY: 220,
+      scale: { start: 0.65, end: 0.1 }, alpha: { start: 0.95, end: 0 },
+      tint: [0xff8030, 0xffd23f, 0xff5020],
+      blendMode: Phaser.BlendModes.ADD, emitting: false,
+    }).setDepth(6);
   }
 
   private buildWarnArrow(): void {
@@ -551,8 +860,9 @@ export class LevelScene extends Phaser.Scene {
 
   private setupMusic(): void {
     this.sound.stopByKey('music-menu');
-    if (this.cache.audio.exists('music-world1')) {
-      this.musicWorld = this.sound.add('music-world1', { loop: true, volume: 0.5 });
+    const key = `music-world${this.world}`;
+    if (this.cache.audio.exists(key)) {
+      this.musicWorld = this.sound.add(key, { loop: true, volume: 0.5 });
       this.musicWorld.play();
     }
   }
@@ -598,6 +908,9 @@ export class LevelScene extends Phaser.Scene {
           hp: this.combat.dragon.hp, maxHp: this.combat.dragon.maxHp,
           portraitKey: `dragon-${this.def.dragon.toLowerCase()}`,
         }
+        : null,
+      runner: this.rn && this.phase === 'RUNNER'
+        ? { progress: this.rn.progress() }
         : null,
     };
   }
@@ -671,6 +984,12 @@ export class LevelScene extends Phaser.Scene {
 
     this.levelTime += dt;
 
+    // ── faza RUNNER: core/runnerPattern + physicsSim, scena renderuje ────
+    if (this.phase === 'RUNNER') {
+      this.updateRunner(dt);
+      return;
+    }
+
     // ── gracz ────────────────────────────────────────────────────────────
     const left = this.cursors.left.isDown || this.keys.A.isDown;
     const right = this.cursors.right.isDown || this.keys.D.isDown;
@@ -692,8 +1011,12 @@ export class LevelScene extends Phaser.Scene {
     }
 
     this.updateArrows(dt);
+    this.updatePowerup(dt);
     this.updatePickups();
     this.updateTraps(dt);
+    this.updateGeysers();
+    this.updateBoulders(dt);
+    this.updateVanish(dt);
     this.updateHazards();
     this.updateEnemies(dt);
     this.updateEcho(dt);
@@ -789,9 +1112,22 @@ export class LevelScene extends Phaser.Scene {
         if (!sn.alive || sn.dying) continue;
         const rr = sn.rect();
         if (ax > rr.x && ax < rr.x + rr.w && ay > rr.y - 4 && ay < rr.y + rr.h + 4) {
-          sn.kill('snail-hit');
+          sn.die();
           this.addScore(ENEMY_SCORE.toczek, rr.x + rr.w / 2, rr.y);
           this.maybeDrop(rr.x + rr.w / 2, rr.y);
+          this.killArrow(a);
+          consumed = true;
+          break;
+        }
+      }
+      if (consumed) continue;
+      for (const m of this.machacze) {
+        if (!m.alive || m.dying) continue;
+        const rr = m.rect();
+        if (ax > rr.x && ax < rr.x + rr.w && ay > rr.y - 4 && ay < rr.y + rr.h + 4) {
+          m.kill('bat-hit');
+          this.addScore(ENEMY_SCORE.machacz, rr.x + rr.w / 2, rr.y);
+          this.maybeDrop(rr.x + rr.w / 2, rr.y, 'machacz');
           this.killArrow(a);
           consumed = true;
           break;
@@ -827,13 +1163,15 @@ export class LevelScene extends Phaser.Scene {
     this.floatText(x, y - 10, `+${points}`, color);
   }
 
-  private maybeDrop(x: number, y: number): void {
-    if (Math.random() >= 0.3) return;   // aneks 6.3: drop 30% kryształ
-    const s = this.add.sprite(x, y - 8, 'crystal', 0);
-    s.play('crystal-spin');
+  /** dropy przeciwników (aneks 6.3): toczek/skoczka 30% kryształ, machacz 20% diament */
+  private maybeDrop(x: number, y: number, enemy: keyof typeof ENEMY_DROP_CHANCE = 'toczek'): void {
+    if (Math.random() >= ENEMY_DROP_CHANCE[enemy]) return;
+    const kind = enemy === 'machacz' ? 'diamond' : 'crystal';
+    const s = this.add.sprite(x, y - 8, kind, 0);
+    s.play(`${kind}-spin`);
     s.setDepth(-30);
-    this.pickups.push({ kind: 'crystal', x, y: y - 8, sprite: s, taken: false });
-    this.map.crystalTotal += 1;
+    this.pickups.push({ kind, x, y: y - 8, sprite: s, taken: false });
+    if (kind === 'crystal') this.map.crystalTotal += 1;
     this.emitHud();
   }
 
@@ -844,14 +1182,18 @@ export class LevelScene extends Phaser.Scene {
     const py = this.player.cy;
     const ex = this.echoE && this.echoPresent() ? this.echoE.logic.x : null;
     const ey = this.echoE && this.echoPresent() ? this.echoE.logic.y - TILE : null;
+    const magnetR = this.powerup?.kind === 'magnet' ? POWERUP_MAGNET_R : 0;
     for (const p of this.pickups) {
       if (p.taken) continue;
       const dp = Phaser.Math.Distance.Between(px, py, p.x, p.y);
       let byEcho = false;
       if (dp > PICKUP_RADIUS) {
-        // magnes Echo: kryształy i diamenty w promieniu 3 kratek (aneks 6.1)
-        if (ex !== null && ey !== null && (p.kind === 'crystal' || p.kind === 'diamond')
+        const treasure = p.kind === 'crystal' || p.kind === 'diamond';
+        if (treasure && magnetR > 0 && dp <= magnetR) {
+          // power-up Magnes (aneks 7): promień 5 kolumn
+        } else if (ex !== null && ey !== null && treasure
           && Phaser.Math.Distance.Between(ex, ey, p.x, p.y) <= ECHO_MAGNET_R) {
+          // magnes Echo: kryształy i diamenty w promieniu 3 kratek (aneks 6.1)
           byEcho = true;
         } else {
           continue;
@@ -902,12 +1244,33 @@ export class LevelScene extends Phaser.Scene {
         this.floatText(x, y, 'PLACEK!', COL.gold, 9);
         this.events.emit('hud:flight', { texture: 'placek', sx, sy, target: 'crystal' });
         this.sfx('sfx-gate-open', 0.4);
-        this.toast('Legendarny Placek w plecaku. Pilnuj go!', 2200);
+        if (this.def.echo === 'absent' && !this.echoE) {
+          // skrypt 2-2 (aneks 8.6): odbity placek ściąga Echo z powrotem
+          const feet = (standRow(this.map, Math.floor(this.player.cx / TILE),
+            (rr, cc) => this.extraSolid.has(cellKey(rr, cc))) + 1) * TILE;
+          this.echoE = new EchoEntity(this, this.player.cx - 32, feet, false);
+          this.toast('Placek odbity! Echo wraca do drużyny!', 2600);
+          this.sfx('sfx-echo-whistle', 0.55);
+        } else {
+          this.toast('Legendarny Placek w plecaku. Pilnuj go!', 2200);
+        }
         break;
       case 'heart':
         this.lives++;
         this.floatText(x, y, '+1 ŻYCIE', COL.danger, 9);
         this.sfx('sfx-fanfare', 0.25);
+        break;
+      case 'pw_shield':
+        this.powerup = { kind: 'shield', t: POWERUP_SHIELD_TIME, total: POWERUP_SHIELD_TIME };
+        this.floatText(x, y, 'TARCZA!', COL.cyan, 9);
+        this.sfx('sfx-shield-clink', 0.5);
+        this.toast('Tarcza: pochłania 1 trafienie (8 s).', 2000);
+        break;
+      case 'pw_magnet':
+        this.powerup = { kind: 'magnet', t: POWERUP_MAGNET_TIME, total: POWERUP_MAGNET_TIME };
+        this.floatText(x, y, 'MAGNES!', COL.white, 9);
+        this.sfx('sfx-crystal', 0.5);
+        this.toast('Magnes: przyciąga skarby (12 s).', 2000);
         break;
     }
     if (byEcho) this.floatText(x, y - 14, 'ECHO!', COL.gold, 7);
@@ -962,6 +1325,168 @@ export class LevelScene extends Phaser.Scene {
     }
   }
 
+  /** power-up: licznik + pasek nad głową + miganie w ostatnich 2 s (aneks 7) */
+  private updatePowerup(dt: number): void {
+    if (!this.powerup) {
+      this.powerupBar?.setVisible(false);
+      return;
+    }
+    this.powerup.t -= dt;
+    if (this.powerup.t <= 0) {
+      this.powerup = null;
+      this.powerupBar?.setVisible(false);
+      return;
+    }
+    if (!this.powerupBar) {
+      this.powerupBar = this.add.rectangle(0, 0, 20, 3, COLN.cyan).setDepth(25);
+    }
+    const p = this.powerup;
+    this.powerupBar.setVisible(true)
+      .setFillStyle(p.kind === 'shield' ? COLN.cyan : COLN.white)
+      .setPosition(this.player.cx, this.player.headY - 8);
+    this.powerupBar.width = Math.max(2, 20 * (p.t / p.total));
+    if (p.t < 2 && Math.floor(this.time.now / 120) % 2 === 0) {
+      this.player.sprite.setAlpha(0.5);
+    }
+  }
+
+  /** gejzery (aneks 6.4): cykl globalny 4 s — nauka rytmu */
+  private updateGeysers(): void {
+    if (this.geysers.length === 0) return;
+    const t = this.levelTime % GEYSER_CYCLE;
+    const state: GeyserEntity['state'] =
+      t < GEYSER_REST ? 'rest' : t < GEYSER_REST + GEYSER_WARN ? 'warn' : 'erupt';
+    devMark({ geyser: state });
+    const pb = this.player.body;
+    for (const g of this.geysers) {
+      g.state = state;
+      if (state === 'rest') {
+        g.sprite.x = g.x;
+        continue;
+      }
+      if (state === 'warn') {
+        // bulgot: drganie podstawki + pojedyncze bąble
+        g.sprite.x = g.x + (Math.floor(this.time.now / 60) % 2 === 0 ? 0.7 : -0.7);
+        if (Math.floor(this.time.now / 140) % 2 === 0) {
+          this.emGeyser.emitParticleAt(g.x + (Math.random() * 6 - 3), g.baseY - 6, 1);
+        }
+        continue;
+      }
+      // erupcja: kolumna 4 wierszy (particles) + parzy jak kaktus
+      g.sprite.x = g.x;
+      this.emGeyser.emitParticleAt(g.x + (Math.random() * 8 - 4), g.baseY - 2, 2);
+      this.emGeyser.emitParticleAt(g.x + (Math.random() * 6 - 3), g.baseY - 30, 1);
+      if (this.player.iframes <= 0 && !this.frozen) {
+        const colRect = { x: g.x - 6, y: g.baseY - 4 * TILE, w: 12, h: 4 * TILE };
+        if (pb.x < colRect.x + colRect.w && colRect.x < pb.x + pb.width
+          && pb.y < colRect.y + colRect.h && colRect.y < pb.y + pb.height) {
+          this.hurtPlayer(g.x);
+        }
+      }
+    }
+  }
+
+  /** głaz Rock Head (aneks 6.4): trigger ±2 kolumny → telegraf → spada */
+  private updateBoulders(dt: number): void {
+    const pb = this.player.body;
+    for (const b of this.bouldersE) {
+      if (b.state === 'armed') {
+        if (Math.abs(this.player.cx - b.x) <= 2.5 * TILE && this.player.cy > b.y0 - TILE) {
+          b.state = 'telegraph';
+          b.t = BOULDER_TELEGRAPH;
+          b.bang.setVisible(true);
+        }
+      } else if (b.state === 'telegraph') {
+        b.t -= dt;
+        // trzęsienie ±1 px + `!`
+        b.sprite.x = b.x + (Math.floor(this.time.now / 50) % 2 === 0 ? 1 : -1);
+        if (b.t <= 0) {
+          b.state = 'fall';
+          b.bang.setVisible(false);
+          b.sprite.x = b.x;
+        }
+      } else if (b.state === 'fall') {
+        b.y += BOULDER_FALL_SPEED * dt;
+        b.sprite.y = b.y;
+        if (this.player.iframes <= 0 && !this.frozen) {
+          const r = { x: b.x - 8, y: b.y - 8, w: 16, h: 16 };
+          if (pb.x < r.x + r.w && r.x < pb.x + pb.width
+            && pb.y < r.y + r.h && r.y < pb.y + pb.height) {
+            this.hurtPlayer(b.x);
+          }
+        }
+        if (b.y >= b.restY) {
+          b.y = b.restY;
+          b.sprite.y = b.y;
+          b.state = 'lie';
+          b.t = BOULDER_LIE_TIME;
+          this.cameras.main.shake(120, 0.006);
+          this.emDust.explode(8, b.x, b.y + 8);
+          this.sfx('sfx-land', 0.5);
+        }
+        if (b.y > 21 * TILE) {   // wpadł w przepaść
+          b.state = 'hidden';
+          b.t = BOULDER_HIDDEN_TIME;
+          b.sprite.setVisible(false);
+        }
+      } else if (b.state === 'lie') {
+        b.t -= dt;
+        if (b.t <= 0) {
+          b.state = 'hidden';
+          b.t = BOULDER_HIDDEN_TIME;
+          b.sprite.setVisible(false);
+        }
+      } else {   // hidden → respawn na półce
+        b.t -= dt;
+        if (b.t <= 0) {
+          b.state = 'armed';
+          b.y = b.y0;
+          b.sprite.setPosition(b.x, b.y0).setVisible(true);
+        }
+      }
+    }
+  }
+
+  /** znikające platformy / mosty z lian (aneks 6.4) */
+  private updateVanish(dt: number): void {
+    const pb = this.player.body;
+    for (const v of this.vanishE) {
+      if (v.state === 'idle') {
+        const feet = pb.y + pb.height;
+        const onTop = this.player.onGround
+          && Math.abs(feet - v.seg.y) < 3
+          && pb.x + pb.width > v.seg.x && pb.x < v.seg.x + v.seg.widthPx;
+        if (onTop) {
+          v.state = 'blink';
+          v.t = VANISH_BLINK_TIME;
+        }
+      } else if (v.state === 'blink') {
+        v.t -= dt;
+        const on = Math.floor((VANISH_BLINK_TIME - v.t) / 0.2) % 2 === 0;
+        for (const img of v.images) img.setAlpha(on ? 1 : 0.35);
+        if (v.t <= 0) {
+          v.state = 'gone';
+          v.t = VANISH_GONE_TIME;
+          (v.rect.body as Phaser.Physics.Arcade.StaticBody).enable = false;
+          for (let c = v.seg.c0; c <= v.seg.c1; c++) {
+            this.extraSolid.delete(cellKey(v.seg.r, c));
+          }
+          for (const img of v.images) img.setVisible(false);
+        }
+      } else {
+        v.t -= dt;
+        if (v.t <= 0) {
+          v.state = 'idle';
+          (v.rect.body as Phaser.Physics.Arcade.StaticBody).enable = true;
+          for (let c = v.seg.c0; c <= v.seg.c1; c++) {
+            this.extraSolid.add(cellKey(v.seg.r, c));
+          }
+          for (const img of v.images) img.setVisible(true).setAlpha(1);
+        }
+      }
+    }
+  }
+
   private updateHazards(): void {
     if (this.player.iframes > 0) return;
     const b = this.player.body;
@@ -972,7 +1497,8 @@ export class LevelScene extends Phaser.Scene {
     for (let r = r0; r <= r1; r++) {
       for (let c = c0; c <= c1; c++) {
         const k = cellKey(r, c);
-        if (this.map.cactusCells.has(k) || this.map.spikeCells.has(k) || this.trapCells.has(k)) {
+        if (this.map.cactusCells.has(k) || this.map.spikeCells.has(k)
+          || this.trapCells.has(k) || this.lavaCells.has(k)) {
           this.hurtPlayer((c + 0.5) * TILE);
           return;
         }
@@ -982,6 +1508,16 @@ export class LevelScene extends Phaser.Scene {
 
   private hurtPlayer(sourceX: number): void {
     if (this.player.iframes > 0 || this.frozen) return;
+    // tarcza (aneks 7): pochłania 1 trafienie — także kaktus/pułapkę
+    if (this.powerup?.kind === 'shield') {
+      this.powerup = null;
+      this.powerupBar?.setVisible(false);
+      this.player.iframes = 0.8;
+      this.emSpark.explode(14, this.player.cx, this.player.cy);
+      this.sfx('sfx-shield-explode', 0.5);
+      this.toast('Tarcza pochłonęła trafienie!', 1800);
+      return;
+    }
     const dir: -1 | 1 = this.player.cx < sourceX ? -1 : 1;
     this.hearts--;
     this.sfx('sfx-heart-loss', 0.6);
@@ -1075,6 +1611,12 @@ export class LevelScene extends Phaser.Scene {
   private respawnAfterDeath(): void {
     this.physics.world.resume();
     this.frozen = false;
+    if (this.phase === 'RUNNER') {
+      // reset sekcji od początku, prędkość startowa (aneks 8.3)
+      this.runnerSectionReset();
+      this.emitHud();
+      return;
+    }
     if (this.phase === 'ARENA' && this.combat) {
       // checkpoint areny: HP smoka zachowane, timer ucieczki od nowa
       this.combat.restart();
@@ -1111,6 +1653,27 @@ export class LevelScene extends Phaser.Scene {
       t.sprite.setVisible(false).setAlpha(1).setTint(0xffffff);
     }
     this.trapCells.clear();
+    // 2-2: pułapki aktywne od startu (aneks 8.6) — wracają po resecie
+    if (this.levelId === '2-2') this.activateAllTraps();
+    for (const m of this.machacze) m.destroy();
+    this.machacze = [];
+    this.machaczFired = this.map.machaczTriggers.map(() => false);
+    for (const b of this.bouldersE) {
+      b.state = 'armed';
+      b.t = 0;
+      b.y = b.y0;
+      b.sprite.setPosition(b.x, b.y0).setVisible(true);
+      b.bang.setVisible(false);
+    }
+    for (const v of this.vanishE) {
+      v.state = 'idle';
+      v.t = 0;
+      (v.rect.body as Phaser.Physics.Arcade.StaticBody).enable = true;
+      for (let c = v.seg.c0; c <= v.seg.c1; c++) this.extraSolid.add(cellKey(v.seg.r, c));
+      for (const img of v.images) img.setVisible(true).setAlpha(1);
+    }
+    this.powerup = null;
+    this.powerupBar?.setVisible(false);
     if (this.thiefE) {
       this.thiefE.destroy();
       this.thiefE = null;
@@ -1142,7 +1705,7 @@ export class LevelScene extends Phaser.Scene {
       const pFeet = pb.y + pb.height;
       if (overlapX && pb.velocity.y > 40 && pFeet > r.y - 6 && pFeet < r.y + 12) {
         // skok na grzbiet pokonuje Toczka (aneks 6.3)
-        sn.kill('snail-hit');
+        sn.die();
         this.player.body.setVelocityY(-this.char.jumpV0 * 0.55);
         this.addScore(ENEMY_SCORE.toczek, r.x + r.w / 2, r.y);
         this.emDust.explode(5, r.x + r.w / 2, r.y + r.h);
@@ -1151,6 +1714,28 @@ export class LevelScene extends Phaser.Scene {
         continue;
       }
       if (overlapX && pb.y < r.y + r.h && r.y < pb.y + pb.height) {
+        this.hurtPlayer(r.x + r.w / 2);
+      }
+    }
+    // Machacz: spawn na wyzwalaczu `2`, przelot sinusoidą (aneks 6.3)
+    for (let i = 0; i < this.map.machaczTriggers.length; i++) {
+      if (this.machaczFired[i]) continue;
+      const tr = this.map.machaczTriggers[i];
+      if (Math.abs(this.player.cx - (tr.x + 8)) < 12 * TILE) {
+        this.machaczFired[i] = true;
+        const dir: -1 | 1 = this.player.cx < tr.x ? -1 : 1;
+        this.machacze.push(new Machacz(
+          this, tr.r, tr.c, dir, this.map.widthPx,
+          this.world === 3 ? WORLD3_ENEMY_TINT : 0xffffff,
+        ));
+      }
+    }
+    for (const m of this.machacze) {
+      m.update(dt, env);
+      if (!m.alive || m.dying) continue;
+      const r = m.rect();
+      if (pb.x < r.x + r.w && r.x < pb.x + pb.width
+        && pb.y < r.y + r.h && r.y < pb.y + pb.height) {
         this.hurtPlayer(r.x + r.w / 2);
       }
     }
@@ -1292,7 +1877,12 @@ export class LevelScene extends Phaser.Scene {
       && pb.y < tr.y + tr.h && tr.y < pb.y + pb.height;
     if (overlap) {
       const logic = this.thiefE.logic;
-      if (logic.state === 'approach') {
+      if (logic.state === 'approach' && this.powerup?.kind === 'shield') {
+        // tarcza: 100% ochrony przed kradzieżą (aneks 7) — złodziej zmyka z niczym
+        logic.steal({ arrows: 0, hasCake: false, diamondsLevel: 0 }, false, this.map.widthPx);
+        this.toast('Tarcza ochroniła plecak!', 2000);
+        this.sfx('sfx-shield-clink', 0.5);
+      } else if (logic.state === 'approach') {
         const bp = { arrows: this.arrows, hasCake: this.hasCake, diamondsLevel: this.diamondsLevel };
         const ev = logic.steal(bp, this.char.protectedBackpack, this.map.widthPx);
         const stolenDiamond = this.diamondsLevel - bp.diamondsLevel;
@@ -1375,8 +1965,6 @@ export class LevelScene extends Phaser.Scene {
 
   private startArena(instant: boolean): void {
     if (this.phase !== 'PLATFORM' || !this.def.dragon || this.def.arenaX === undefined) return;
-    this.phase = 'ARENA';
-    const arenaX0 = this.def.arenaX * TILE;
     // uszczelnienie ściany za graczem + prawa krawędź areny
     for (const rect of this.sealRects) {
       (rect.body as Phaser.Physics.Arcade.StaticBody).enable = true;
@@ -1385,6 +1973,22 @@ export class LevelScene extends Phaser.Scene {
     if (this.def.wallCol !== undefined) {
       for (const [r, c] of sealWallCells(this.def.wallCol)) this.extraSolid.add(cellKey(r, c));
     }
+    this.enterArena(this.def.arenaX * TILE, instant);
+  }
+
+  /**
+   * Arena po runnerze (1-3 Samum, 2-3 Monsun — aneks 8.3/8.4): osobna mapa
+   * 80 kratek, smok „dogoniony" startuje od razu; Monsun z tarczą (core wie).
+   */
+  private startRunnerArena(): void {
+    if (!this.def.dragon) return;
+    this.phase = 'PLATFORM';   // wymagane przez enterArena (spójny stan przejścia)
+    this.enterArena(0, true);
+  }
+
+  private enterArena(arenaX0: number, instant: boolean): void {
+    if (!this.def.dragon) return;
+    this.phase = 'ARENA';
     // combat core — checkpoint z zachowanym HP przy kolejnych wejściach
     if (!this.combat) {
       const oPts = this.map.oPoints.map((o) => ({ x: o.x + 8, y: o.y + 8 }));
@@ -1403,7 +2007,7 @@ export class LevelScene extends Phaser.Scene {
     }
     // checkpoint
     this.checkpointX = arenaX0 + 3 * TILE;
-    this.checkpointFeetY = (standRow(this.map, this.def.arenaX + 3) + 1) * TILE;
+    this.checkpointFeetY = (standRow(this.map, Math.floor(arenaX0 / TILE) + 3) + 1) * TILE;
     this.hearts = this.diff.arenaHearts[this.charId];
     this.maxHearts = this.hearts;
     // kamera: dojazd + LOCK na 80 kratek
@@ -1500,11 +2104,68 @@ export class LevelScene extends Phaser.Scene {
         s.setVisible(false);
       }
     }
+    // zionięcie Piry: pas ziemi płonie (core liczy c0..c1 — 9 kolumn)
+    this.renderGroundFlames();
+    // telegraf ataku naziemnego: pas ziemi pod graczem miga (aneks 8.4.1)
+    const d = this.combat.dragon;
+    const flameTele = d.state === 'TELEGRAPH' && d.pattern === 'pira'
+      && d.atkA % 2 < 1;
+    if (flameTele) {
+      if (!this.flameShimmer) {
+        this.flameShimmer = this.add.rectangle(0, 0, 9 * TILE, 6, 0xff5a2a, 0.5)
+          .setBlendMode(Phaser.BlendModes.ADD).setDepth(-39);
+      }
+      this.flameShimmer.setVisible(Math.floor(this.time.now / 110) % 2 === 0)
+        .setPosition(this.player.cx, 19 * TILE - 3);
+    } else {
+      this.flameShimmer?.setVisible(false);
+    }
     // timer ucieczki w HUD (+ ostrzeżenie 30 s)
     const remaining = Math.max(0, Math.ceil(this.diff.dragonFlee - this.combat.arenaTime));
     if (remaining !== this.lastTimerEmit) {
       this.lastTimerEmit = remaining;
       this.events.emit('hud:timer', { remaining, warning: remaining <= 30 });
+    }
+  }
+
+  /** render + kolizja pasów ognia przy ziemi (Pira; core: ArenaCombat.flames) */
+  private renderGroundFlames(): void {
+    if (!this.combat) return;
+    const flames = this.combat.flames;
+    devMark({ flames: flames.filter((f) => f.alive).length });
+    while (this.flameRects.length < flames.length) {
+      this.flameRects.push(
+        this.add.rectangle(0, 0, TILE, TILE, 0xff9a30, 0.85)
+          .setBlendMode(Phaser.BlendModes.ADD).setDepth(-38).setVisible(false),
+      );
+    }
+    const pb = this.player.body;
+    for (let i = 0; i < this.flameRects.length; i++) {
+      const rect = this.flameRects[i];
+      const fl: GroundFlame | undefined = flames[i];
+      if (!fl || !fl.alive) {
+        rect.setVisible(false);
+        continue;
+      }
+      const x0 = fl.c0 * TILE;
+      const w = (fl.c1 - fl.c0 + 1) * TILE;
+      const y = 18 * TILE;   // pas nad podłogą areny (wiersz 18)
+      rect.setVisible(true).setPosition(x0 + w / 2, y + 10);
+      rect.width = w;
+      rect.height = 12;
+      rect.setAlpha(0.6 + 0.35 * Math.abs(Math.sin(this.time.now / 90)));
+      // płomień particles wzdłuż pasa (gęsto — pas ma buchać ogniem)
+      this.emFire.emitParticleAt(x0 + Math.random() * w, y + 12, 2);
+      this.emFire.emitParticleAt(x0 + Math.random() * w, y + 6, 1);
+      if (Math.floor(this.time.now / 60) % 2 === 0) {
+        this.emGeyser.emitParticleAt(x0 + Math.random() * w, y + 12, 1);
+      }
+      // parzy (w arenie = −1 serce)
+      if (this.player.iframes <= 0 && !this.frozen
+        && pb.x + pb.width > x0 && pb.x < x0 + w
+        && pb.y + pb.height > y - 2) {
+        this.hurtPlayer(this.player.cx + 8);
+      }
     }
   }
 
@@ -1625,6 +2286,474 @@ export class LevelScene extends Phaser.Scene {
       cont.destroy();
       this.levelComplete(true);
     });
+  }
+
+  // ════════════════════════ RUNNER (typ C — aneks 8.3) ═══════════════════
+
+  private buildRunner(): void {
+    const pattern = RUNNER_PATTERNS[this.def.pattern ?? ''];
+    const useLina = !!this.def.gate && this.save.echo_lina;
+    this.rn = new RunnerState(pattern, this.diff, useLina);
+    this.gateLogic = this.def.gate ? new GateState() : null;
+    // licznik kryształów HUD/gwiazdek liczy tor runnera
+    this.map.crystalTotal = this.rn.crystalTotal;
+    // dev: ?rnff=0.95 → szybkie przewinięcie sekcji (e2e bramy/areny)
+    const ff = devParam('rnff');
+    if (ff) {
+      const f = Math.max(0, Math.min(0.999, parseFloat(ff)));
+      if (Number.isFinite(f)) this.rn.traveled = this.rn.trackLen * f;
+    }
+
+    // grunt: pula kafli (przewijana), wiersz 19
+    const tex = this.terrainTex();
+    for (let i = 0; i < 44; i++) {
+      this.rnGround.push(
+        this.add.image(0, RUNNER_GROUND_Y + 8, tex, 1).setDepth(-50).setVisible(false),
+      );
+    }
+    // przeszkody z patternu: kaktus (1×2) / Machacz-nietoperz (ślizg!)
+    const cactus = this.cactusTex();
+    for (const o of this.rn.obstacles) {
+      let s: Phaser.GameObjects.Sprite;
+      if (o.kind === 'K') {
+        s = this.add.sprite(0, RUNNER_GROUND_Y, cactus, 0).setOrigin(0.5, 1);
+      } else {
+        s = this.add.sprite(0, 17 * TILE + 8, 'enemy-bat-flying', 0).setOrigin(0.5, 0.5);
+        s.play({ key: 'bat-fly', startFrame: Math.floor(o.x / 100) % 7 });
+        if (this.world === 3) s.setTint(WORLD3_ENEMY_TINT);
+      }
+      s.setDepth(-40).setVisible(false);
+      this.rnObSprites.push(s);
+      this.rnObDead.push(false);
+      this.rnObSeen.push(false);
+    }
+    // kryształy (wiersz skoku) i pęki strzał (grunt)
+    for (const c of this.rn.crystals) {
+      const s = this.add.sprite(0, c.y + 8, 'crystal', 0).setDepth(-30).setVisible(false);
+      s.play({ key: 'crystal-spin', startFrame: Math.floor(c.x / 16) % 4 });
+      this.rnCrystalSprites.push(s);
+    }
+    for (const a of this.rn.arrowPacks) {
+      void a;
+      const img = this.add.image(0, RUNNER_GROUND_Y - 6, 'arrow')
+        .setRotation(-Math.PI / 4).setDepth(-30).setVisible(false);
+      this.rnArrowSprites.push(img);
+    }
+    // bohaterka na stałej kolumnie ekranu (RUNNER_PLAYER_X)
+    this.rnSim = createSim(RUNNER_PLAYER_X, RUNNER_GROUND_Y - PLAYER_H);
+    this.rnSim.onGround = true;
+    this.rnView = new RunnerPlayerView(
+      this, RUNNER_PLAYER_X + 8, RUNNER_GROUND_Y, this.charId,
+    );
+    this.ensureArrowPool();
+    this.buildRunnerChaser();
+    // kamera statyczna: świat scrolluje, nie kamera
+    const cam = this.cameras.main;
+    cam.setViewport(0, GAME_FIELD_Y, 640, FIELD_H);
+    cam.setBounds(0, 0, 640, FIELD_H);
+    cam.setBackgroundColor(COLN.night);
+  }
+
+  /** smok pościgu: 1-3 Samum UCIEKA przed tobą (sieje pułapki — aneks 3.5);
+   *  2-3 Monsun GONI za plecami; 3-3 lawa idzie od lewej (aneks 8.6) */
+  private buildRunnerChaser(): void {
+    if (this.levelId === '1-3') {
+      this.rnChaser = this.add.sprite(552, 92, 'dragon-samum', 72)
+        .setScale(1.15).setDepth(-20);
+      this.rnChaser.play('dragon-samum-fly');
+    } else if (this.levelId === '2-3') {
+      this.rnChaser = this.add.sprite(52, 104, 'dragon-monsun', 72)
+        .setScale(1.2).setDepth(-20);
+      this.rnChaser.play('dragon-monsun-fly');
+    } else {
+      // 3-3: ściana lawy za plecami (particle, nie asset)
+      this.add.rectangle(9, FIELD_H / 2, 18, FIELD_H, 0x7a1a10, 0.9).setDepth(-22);
+      this.add.rectangle(20, FIELD_H / 2, 6, FIELD_H, 0xff6a28, 0.85)
+        .setBlendMode(Phaser.BlendModes.ADD).setDepth(-22);
+      this.add.particles(0, 0, 'p-circle-small', {
+        x: { min: 2, max: 22 }, y: { min: 8, max: FIELD_H - 6 },
+        speedX: { min: 8, max: 40 }, speedY: { min: -50, max: -10 },
+        lifespan: { min: 300, max: 800 },
+        scale: { start: 0.55, end: 0 }, alpha: { start: 0.95, end: 0 },
+        tint: [0xff8030, 0xffd23f, 0xff4020],
+        blendMode: Phaser.BlendModes.ADD, frequency: 70, quantity: 1,
+      }).setDepth(-21);
+    }
+  }
+
+  private updateRunner(dt: number): void {
+    const rn = this.rn;
+    const sim = this.rnSim;
+    const view = this.rnView;
+    if (!rn || !sim || !view) return;
+
+    if (!this.gateOpening) rn.update(dt);
+
+    // input: skok edge-triggered, ślizg trzymany (aneks 8.1/8.3)
+    const jumpPressed = Phaser.Input.Keyboard.JustDown(this.cursors.space)
+      || Phaser.Input.Keyboard.JustDown(this.cursors.up)
+      || Phaser.Input.Keyboard.JustDown(this.keys.W);
+    const down = this.cursors.down.isDown || this.keys.S.isDown;
+    const absX = rn.traveled + RUNNER_PLAYER_X;
+    const env: SimEnv = {
+      groundYAt: () => {
+        const gx = Math.floor(absX / TILE) * TILE;
+        return rn.groundAt(gx) || rn.groundAt(gx + TILE) ? RUNNER_GROUND_Y : null;
+      },
+    };
+    const wasGround = sim.onGround;
+    simStep(sim, { move: 0, jumpPressed, down }, this.char, env, dt);
+    if (jumpPressed && wasGround && !sim.onGround) {
+      this.sfx('sfx-jump', 0.45, true);
+      this.emDust.explode(4, RUNNER_PLAYER_X + 8, RUNNER_GROUND_Y);
+    }
+    if (!this.rnWasGround && sim.onGround) {
+      this.sfx('sfx-land', 0.3, true);
+      this.emDust.explode(4, RUNNER_PLAYER_X + 8, sim.y + sim.h);
+    }
+    this.rnWasGround = sim.onGround;
+    // kurz sprintu
+    if (sim.onGround && Math.floor(this.time.now / 140) % 2 === 0) {
+      this.emDust.explode(1, RUNNER_PLAYER_X, sim.y + sim.h);
+    }
+
+    // strzały (Machacz 1 HP; kaktus połyka strzałę — core/runnerArrowHit)
+    if (Phaser.Input.Keyboard.JustDown(this.keys.X)) this.runnerShoot(false);
+    if (Phaser.Input.Keyboard.JustDown(this.keys.Z)) this.runnerShoot(true);
+    this.updateRunnerArrows(dt);
+
+    // zbiórki (core) + efekty na świeżo zebranych
+    const takenC = rn.crystals.map((c) => c.taken);
+    const takenA = rn.arrowPacks.map((a) => a.taken);
+    collectRunnerPickups(rn, sim.y, sim.h);
+    for (let i = 0; i < rn.crystals.length; i++) {
+      if (!takenC[i] && rn.crystals[i].taken) {
+        this.collect('crystal', rn.crystals[i].x - rn.traveled + 8, rn.crystals[i].y + 8, false);
+      }
+    }
+    for (let i = 0; i < rn.arrowPacks.length; i++) {
+      if (!takenA[i] && rn.arrowPacks[i].taken) {
+        this.collect('arrow', rn.arrowPacks[i].x - rn.traveled + 8, RUNNER_GROUND_Y - 6, false);
+      }
+    }
+
+    // kolizje (hojny hitbox z core) + dziury
+    if (!this.rnFinished && view.iframes <= 0) {
+      const hit = checkObstacleHit(rn, sim.y, sim.h);
+      if (hit) {
+        this.emHitSpark.explode(8, RUNNER_PLAYER_X + 8, sim.y + sim.h / 2);
+        this.loseLife();
+        return;
+      }
+    }
+    if (sim.y > 20.5 * TILE) {
+      this.loseLife();
+      return;
+    }
+
+    this.renderRunner(dt);
+
+    // pasek postępu (HUD)
+    const pct = Math.round(rn.progress() * 100);
+    if (pct !== this.rnLastProgress) {
+      this.rnLastProgress = pct;
+      this.events.emit('hud:runner', { progress: rn.progress() });
+    }
+
+    devMark({
+      scene: 'Level', level: this.levelId, phase: this.phase,
+      progress: Math.round(rn.progress() * 1000) / 1000,
+      runnerDone: rn.done, playerY: Math.round(sim.y),
+      sliding: sim.crouch, crystals: this.crystals,
+      nearestN: this.nearestObstacleSx('n'), nearestK: this.nearestObstacleSx('K'),
+      gateOpening: this.gateOpening,
+    });
+
+    if (rn.done && !this.rnFinished) {
+      this.rnFinished = true;
+      this.onRunnerDone();
+    }
+    if (this.rnFinished && this.gateLogic) this.updateGate(dt);
+  }
+
+  /** ekranowe x najbliższej żywej przeszkody danego typu (dev/e2e) */
+  private nearestObstacleSx(kind: 'K' | 'n'): number {
+    const rn = this.rn;
+    if (!rn) return 9999;
+    let best = 9999;
+    for (const o of rn.obstacles) {
+      if (!o.alive || o.kind !== kind) continue;
+      const sx = o.x - rn.traveled - RUNNER_PLAYER_X;
+      if (sx > -2 * TILE && sx < best) best = sx;
+    }
+    return Math.round(best);
+  }
+
+  private runnerShoot(magic: boolean): void {
+    if (magic ? this.magic <= 0 : this.arrows <= 0) return;
+    const sim = this.rnSim;
+    if (!sim) return;
+    const shot = this.arrowPool.find((a) => !a.alive);
+    if (!shot) return;
+    if (magic) this.magic--;
+    else this.arrows--;
+    this.emitHud();
+    shot.alive = true;
+    shot.magic = magic;
+    shot.vx = ARROW_SPEED;
+    shot.traveled = 0;
+    shot.sprite
+      .setTexture(magic ? 'arrow-magic' : 'arrow')
+      .setPosition(RUNNER_PLAYER_X + 18, sim.y + 6)
+      .setFlipX(false)
+      .setVisible(true);
+    this.sfx(magic ? 'sfx-shoot-magic' : 'sfx-shoot', 0.45, true);
+  }
+
+  private updateRunnerArrows(dt: number): void {
+    const rn = this.rn;
+    if (!rn) return;
+    for (const a of this.arrowPool) {
+      if (!a.alive) continue;
+      const step = a.vx * dt;
+      a.sprite.x += step;
+      a.traveled += Math.abs(step);
+      if (a.magic) this.emTrail.emitParticleAt(a.sprite.x - 6, a.sprite.y, 1);
+      if (a.traveled > ARROW_RANGE || a.sprite.x > 660) {
+        this.killArrow(a);
+        continue;
+      }
+      const hit = runnerArrowHit(rn, a.sprite.x, a.sprite.y);
+      if (!hit) continue;
+      if (hit.killed) {
+        const idx = rn.obstacles.indexOf(hit.obstacle);
+        const s = this.rnObSprites[idx];
+        if (s && !this.rnObDead[idx]) {
+          this.rnObDead[idx] = true;
+          s.play('bat-hit', true);
+          s.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => s.setVisible(false));
+        }
+        this.addScore(ENEMY_SCORE.machacz, a.sprite.x, a.sprite.y);
+        this.emHitSpark.explode(8, a.sprite.x, a.sprite.y);
+        this.sfx('sfx-hit', 0.5, true);
+      } else {
+        this.emDust.explode(3, a.sprite.x, a.sprite.y);   // wbita w kaktus
+      }
+      this.killArrow(a);
+    }
+  }
+
+  /** sync obrazu z RunnerState (grunt, przeszkody, zbiórki, tło, pościg) */
+  private renderRunner(dt: number): void {
+    const rn = this.rn;
+    const sim = this.rnSim;
+    const view = this.rnView;
+    if (!rn || !sim || !view) return;
+    // parallax napędzany przebytą drogą (kamera stoi)
+    for (const l of this.skyLayers) {
+      l.ts.tilePositionX = rn.traveled * (l.factor === 0 ? 0 : l.factor * 0.5)
+        + (this.time.now / 1000) * l.drift;
+    }
+    // grunt
+    const off = rn.traveled % TILE;
+    for (let i = 0; i < this.rnGround.length; i++) {
+      const g = this.rnGround[i];
+      const sx = i * TILE - off;
+      g.setPosition(sx + 8, RUNNER_GROUND_Y + 8);
+      g.setVisible(rn.groundAt(rn.traveled + sx + 1));
+    }
+    // przeszkody
+    for (let i = 0; i < rn.obstacles.length; i++) {
+      const o = rn.obstacles[i];
+      const s = this.rnObSprites[i];
+      const sx = o.x - rn.traveled;
+      if (sx < -3 * TILE || sx > 42 * TILE) {
+        if (!this.rnObDead[i]) s.setVisible(false);
+        this.rnObSeen[i] = this.rnObSeen[i] && sx < 0;
+        continue;
+      }
+      if (!o.alive) {
+        if (!this.rnObDead[i]) s.setVisible(false);
+        continue;
+      }
+      if (!this.rnObSeen[i] && sx < 41 * TILE) {
+        this.rnObSeen[i] = true;
+        // 1-3: Samum „sieje pułapki" — obłoczek przy wejściu przeszkody w kadr
+        if (this.levelId === '1-3' && this.rnChaser) {
+          this.emSmoke.explode(5, 620, o.kind === 'K' ? RUNNER_GROUND_Y - 12 : 17 * TILE + 8);
+          this.tweens.add({
+            targets: this.rnChaser, y: 112, duration: 180, yoyo: true, ease: 'Sine.out',
+          });
+        }
+      }
+      s.setVisible(true);
+      if (o.kind === 'K') {
+        s.setPosition(sx + 8, RUNNER_GROUND_Y);
+      } else {
+        s.setPosition(sx + 8, 17 * TILE + 8 + Math.sin(this.time.now / 160 + i) * 3);
+      }
+    }
+    // zbiórki
+    for (let i = 0; i < rn.crystals.length; i++) {
+      const c = rn.crystals[i];
+      const s = this.rnCrystalSprites[i];
+      const sx = c.x - rn.traveled;
+      s.setVisible(!c.taken && sx > -TILE && sx < 41 * TILE);
+      s.setPosition(sx + 8, c.y + 8 + Math.sin(this.time.now / 250 + i) * 2);
+    }
+    for (let i = 0; i < rn.arrowPacks.length; i++) {
+      const a = rn.arrowPacks[i];
+      const s = this.rnArrowSprites[i];
+      const sx = a.x - rn.traveled;
+      s.setVisible(!a.taken && sx > -TILE && sx < 41 * TILE);
+      s.setPosition(sx + 8, RUNNER_GROUND_Y - 6);
+    }
+    // bohaterka
+    view.update(dt, sim.y + sim.h, sim.onGround, sim.crouch, sim.vy);
+    // pościg: Monsun goni (ryk + szarpnięcie co ~12 s), Samum buja się w locie
+    this.rnChaserT += dt;
+    if (this.rnChaser) {
+      const baseY = this.levelId === '1-3' ? 92 : 104;
+      this.rnChaser.y = baseY + Math.sin(this.time.now / 300) * 6;
+      if (this.levelId === '2-3' && this.rnChaserT > 12) {
+        this.rnChaserT = 0;
+        this.sfx('sfx-dragon-roar', 0.4);
+        this.cameras.main.shake(120, 0.004);
+        this.tweens.add({
+          targets: this.rnChaser, x: 84, duration: 260, yoyo: true, ease: 'Sine.inOut',
+        });
+      }
+    }
+  }
+
+  /** koniec sekcji: 1-3/2-3 → arena smoka; 3-3 → brama bossa (10 kryształów) */
+  private onRunnerDone(): void {
+    this.events.emit('hud:runner-end');
+    if (this.def.gate) {
+      this.buildGateVisual();
+      return;
+    }
+    // przejście do areny: zburz obiekty runnera, zbuduj świat areny
+    this.teardownRunner();
+    this.buildPlatformWorld();
+    this.startRunnerArena();
+  }
+
+  private teardownRunner(): void {
+    for (const g of this.rnGround) g.destroy();
+    this.rnGround = [];
+    for (const s of this.rnObSprites) s.destroy();
+    this.rnObSprites = [];
+    for (const s of this.rnCrystalSprites) s.destroy();
+    this.rnCrystalSprites = [];
+    for (const s of this.rnArrowSprites) s.destroy();
+    this.rnArrowSprites = [];
+    this.rnChaser?.destroy();
+    this.rnChaser = null;
+    this.rnView?.destroy();
+    this.rnView = null;
+    for (const a of this.arrowPool) this.killArrow(a);
+    this.rn = null;
+    this.rnSim = null;
+  }
+
+  /** brama bossa na końcu 3-3 (render; logika w core/GateState) */
+  private buildGateVisual(): void {
+    const gx = 560;
+    const cont = this.add.container(0, 0).setDepth(-35);
+    // filary i nadproże z kafli obsydianu (kolumna 17×5: klatki 4/21/38)
+    for (const [dx, frames] of [[-24, [4, 21, 21, 38]], [24, [4, 21, 21, 38]]] as const) {
+      for (let i = 0; i < frames.length; i++) {
+        cont.add(this.add.image(gx + dx, RUNNER_GROUND_Y - 8 - (frames.length - 1 - i) * TILE,
+          'terrain-obsidian', frames[i]));
+      }
+    }
+    for (let i = -1; i <= 1; i++) {
+      cont.add(this.add.image(gx + i * TILE, RUNNER_GROUND_Y - 8 - 4 * TILE,
+        'terrain-obsidian', 4 * 17 + 1));
+    }
+    // wrota (ciemne) + poświata stanu
+    cont.add(this.add.rectangle(gx, RUNNER_GROUND_Y - 32, 32, 64, 0x1a1420));
+    this.gateGlow = this.add.rectangle(gx, RUNNER_GROUND_Y - 32, 28, 60, 0xff5a5a, 0.25)
+      .setBlendMode(Phaser.BlendModes.ADD).setDepth(-34);
+    const star = this.add.image(gx, RUNNER_GROUND_Y - 78, 'ui-star');
+    cont.add(star);
+    this.tweens.add({
+      targets: star, y: star.y - 5, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.inOut',
+    });
+    cont.add(this.add.sprite(gx - 40, RUNNER_GROUND_Y - 40, 'crystal', 0).setScale(0.8));
+    cont.add(this.add.sprite(gx + 40, RUNNER_GROUND_Y - 40, 'crystal', 1).setScale(0.8));
+    this.gateCont = cont;
+  }
+
+  /** po zatrzymaniu 3-3: sprawdzenie 10 kryształów (core/GateState) */
+  private updateGate(dt: number): void {
+    if (!this.gateLogic || !this.rn || this.gateOpening) return;
+    const need = gateRequirement(this.save.skrzat);
+    const res = this.gateLogic.update(dt, this.crystals, need);
+    if (res === 'open') {
+      this.gateOpening = true;
+      this.gateGlow?.setFillStyle(0x66ff88, 0.4);
+      this.sfx('sfx-gate-open', 0.6);
+      this.toast('Brama otwarta! Do bossa!', 2400);
+      const view = this.rnView;
+      if (view) {
+        this.tweens.add({
+          targets: view.sprite, x: 560, duration: 1200, ease: 'Sine.inOut',
+          onComplete: () => this.levelComplete(false),
+        });
+      } else {
+        this.levelComplete(false);
+      }
+    } else if (res === 'blockedMessage') {
+      this.toast(EVENT_MESSAGES.gateNeedsCrystals, 2200);
+      this.sfx('sfx-shield-clink', 0.5);
+      this.gateGlow?.setFillStyle(0xff5a5a, 0.4);
+    } else if (res === 'reset') {
+      // za mało kryształów: powrót na start sekcji (v1) — snapshot wraca
+      this.toast('Za mało kryształów — jeszcze raz po nie!', 2400);
+      this.runnerSectionReset();
+    }
+  }
+
+  /** pełny reset sekcji runnera (śmierć / brama): snapshot + prędkość startowa */
+  private runnerSectionReset(): void {
+    const rn = this.rn;
+    const sim = this.rnSim;
+    if (!rn || !sim) return;
+    this.arrows = this.snapshot.arrows;
+    this.hasCake = this.snapshot.hasCake;
+    this.diamondsTotal = this.snapshot.diamondsTotal;
+    this.diamondsLevel = 0;
+    this.score = this.snapshot.score;
+    this.crystals = 0;
+    this.magic = 0;
+    this.hearts = this.maxHearts;
+    rn.reset();
+    this.rnFinished = false;
+    this.gateOpening = false;
+    this.gateGlow?.destroy();
+    this.gateGlow = null;
+    this.gateCont?.destroy();
+    this.gateCont = null;
+    sim.y = RUNNER_GROUND_Y - PLAYER_H;
+    sim.vy = 0;
+    sim.h = PLAYER_H;
+    sim.crouch = false;
+    sim.onGround = true;
+    for (let i = 0; i < this.rnObDead.length; i++) {
+      this.rnObDead[i] = false;
+      this.rnObSeen[i] = false;
+      const s = this.rnObSprites[i];
+      const o = rn.obstacles[i];
+      if (o.kind === 'n') s.play('bat-fly', true);
+      s.setVisible(false);
+    }
+    for (const a of this.arrowPool) this.killArrow(a);
+    if (this.rnView) this.rnView.iframes = 1.5;
+    this.events.emit('hud:runner-start');
+    this.events.emit('hud:runner', { progress: 0 });
+    this.emitHud();
   }
 
   // ── koniec poziomu ──────────────────────────────────────────────────────

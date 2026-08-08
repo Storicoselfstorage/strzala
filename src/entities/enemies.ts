@@ -1,11 +1,13 @@
 /**
  * Zwykli przeciwnicy (aneks 6.3) — logika kinematyczna w encji, zero Arcade.
- * Toczek (ślimak PA2): patrol krawędziowy 8 kolumn, 4 kol/s.
+ * Toczek (ślimak/slime PA2 — wariant per świat): patrol krawędziowy 8 kolumn.
  * Skoczka (królik PA2): siad 2 s → telegraf przysiadu 0,5 s → skok ku graczowi.
+ * Machacz (nietoperz PA2, światy 2-3): przelot sinusoidą po wyzwoleniu `2`.
  */
 import Phaser from 'phaser';
 import {
-  GRAVITY, SKOCZKA_JUMP_V, SKOCZKA_JUMP_VX, SKOCZKA_SIT_TIME,
+  GRAVITY, MACHACZ_AMP, MACHACZ_PERIOD, MACHACZ_SPEED,
+  SKOCZKA_JUMP_V, SKOCZKA_JUMP_VX, SKOCZKA_SIT_TIME,
   SKOCZKA_TELEGRAPH, TILE, TOCZEK_PATROL_HALF, TOCZEK_SPEED,
 } from '../core/balance';
 
@@ -13,6 +15,9 @@ export interface EnemyEnv {
   solidAt(r: number, c: number): boolean;
   playerX: number;
 }
+
+/** wariant kolorystyczny na świat (aneks 6.3) */
+export type ToczekSkin = 'snail' | 'slime';
 
 export interface Rect { x: number; y: number; w: number; h: number }
 
@@ -51,16 +56,28 @@ export class Toczek extends EnemyBase {
   private readonly rowFeet: number;
   private dir: -1 | 1 = -1;
   x: number;
+  /** animacja śmierci zależna od skina (Level woła die()) */
+  readonly hitAnim: string;
 
-  constructor(scene: Phaser.Scene, spawnR: number, spawnC: number) {
+  constructor(
+    scene: Phaser.Scene, spawnR: number, spawnC: number,
+    skin: ToczekSkin = 'snail', tint = 0xffffff,
+  ) {
     const x = spawnC * TILE + TILE / 2;
     const feetY = (spawnR + 1) * TILE;
-    super(scene.add.sprite(x, feetY + 1, 'enemy-snail-walk', 0).setOrigin(0.5, 1));
-    this.sprite.play('snail-walk');
+    const tex = skin === 'snail' ? 'enemy-snail-walk' : 'enemy-slime-idle-run';
+    super(scene.add.sprite(x, feetY + 1, tex, 0).setOrigin(0.5, 1));
+    this.sprite.play(skin === 'snail' ? 'snail-walk' : 'slime-move');
+    if (tint !== 0xffffff) this.sprite.setTint(tint);
+    this.hitAnim = skin === 'snail' ? 'snail-hit' : 'slime-hit';
     this.x = x;
     this.spawnX = x;
     this.feetY = feetY;
     this.rowFeet = spawnR + 1;
+  }
+
+  die(): void {
+    this.kill(this.hitAnim);
   }
 
   rect(): Rect {
@@ -97,11 +114,12 @@ export class Skoczka extends EnemyBase {
   x: number;
   y: number;   // stopy (px)
 
-  constructor(scene: Phaser.Scene, spawnR: number, spawnC: number) {
+  constructor(scene: Phaser.Scene, spawnR: number, spawnC: number, tint = 0xffffff) {
     const x = spawnC * TILE + TILE / 2;
     const feetY = (spawnR + 1) * TILE;
     super(scene.add.sprite(x, feetY + 1, 'enemy-bunny-idle', 0).setOrigin(0.5, 1));
     this.sprite.play('bunny-idle');
+    if (tint !== 0xffffff) this.sprite.setTint(tint);
     this.x = x;
     this.y = feetY;
     this.groundFeetY = feetY;
@@ -148,5 +166,54 @@ export class Skoczka extends EnemyBase {
     }
     this.sprite.x = this.x;
     this.sprite.y = this.y + 1;
+  }
+}
+
+/**
+ * Machacz (aneks 6.3): przelot poziomy sinusoidą 8 kol/s, amplituda 2 wiersze,
+ * okres 2 s; spawn na wyzwalaczu `2`, leci w stronę gracza; znika za mapą.
+ */
+export class Machacz extends EnemyBase {
+  private readonly baseY: number;
+  private t = 0;
+  private readonly dir: -1 | 1;
+  private readonly levelWidthPx: number;
+  x: number;
+  y: number;   // środek ciała (px)
+
+  constructor(
+    scene: Phaser.Scene, spawnR: number, spawnC: number, dir: -1 | 1,
+    levelWidthPx: number, tint = 0xffffff,
+  ) {
+    const x = spawnC * TILE + TILE / 2;
+    // baza sinusoidy 2,5 kratki nad znacznikiem — dół łuku muska głowę gracza
+    const baseY = spawnR * TILE - 2.5 * TILE;
+    super(scene.add.sprite(x, baseY, 'enemy-bat-flying', 0).setOrigin(0.5, 0.5));
+    this.sprite.play('bat-fly');
+    if (tint !== 0xffffff) this.sprite.setTint(tint);
+    this.x = x;
+    this.y = baseY;
+    this.baseY = baseY;
+    this.dir = dir;
+    this.levelWidthPx = levelWidthPx;
+    this.sprite.setFlipX(dir > 0);
+  }
+
+  rect(): Rect {
+    return { x: this.x - 10, y: this.y - 8, w: 20, h: 16 };
+  }
+
+  update(dt: number, _env: EnemyEnv): void {
+    if (!this.alive || this.dying) return;
+    this.t += dt;
+    this.x += this.dir * MACHACZ_SPEED * dt;
+    this.y = this.baseY + MACHACZ_AMP * Math.sin((this.t * 2 * Math.PI) / MACHACZ_PERIOD);
+    if (this.x < -3 * TILE || this.x > this.levelWidthPx + 3 * TILE) {
+      this.alive = false;
+      this.sprite.setVisible(false);
+      return;
+    }
+    this.sprite.x = this.x;
+    this.sprite.y = this.y;
   }
 }

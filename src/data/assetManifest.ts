@@ -33,6 +33,9 @@ export const IMAGES: ImageAsset[] = [
   { key: 'powerup-magnet', url: 'assets/sprites/powerup-magnet.png' }, // 16×16
   { key: 'cactus-small', url: 'assets/sprites/cactus-small.png' }, // 16×16
   { key: 'cactus-big', url: 'assets/sprites/cactus-big.png' }, // 16×32
+  { key: 'cactus-bush-big', url: 'assets/sprites/cactus-bush-big.png' }, // 16×32 kolczasty krzak (świat 2)
+  { key: 'cactus-lava-big', url: 'assets/sprites/cactus-lava-big.png' }, // 16×32 lawowy kaktus (świat 3)
+  { key: 'geyser-base', url: 'assets/sprites/geyser-base.png' }, // 16×16 podstawka gejzera (kolumna = particles)
   { key: 'spikes', url: 'assets/sprites/spikes.png' }, // 16×16 (PA1)
   { key: 'boulder', url: 'assets/sprites/boulder.png' }, // 42×42 (PA1 Rock Head idle)
 
@@ -40,6 +43,14 @@ export const IMAGES: ImageAsset[] = [
   { key: 'world1-sky', url: 'assets/bg/world1-sky.png' }, // 384×128
   { key: 'world1-clouds-big', url: 'assets/bg/world1-clouds-big.png' }, // 448×101
   { key: 'world1-clouds-small', url: 'assets/bg/world1-clouds-small.png' }, // 256×48
+  // tła — świat 2 „Dżungla Ech" (F3: gradient + 2 warstwy sylwetek, tileable 320)
+  { key: 'world2-sky', url: 'assets/bg/world2-sky.png' }, // 64×320 pion. gradient
+  { key: 'world2-far', url: 'assets/bg/world2-far.png' }, // 320×192 korony+palmy
+  { key: 'world2-near', url: 'assets/bg/world2-near.png' }, // 320×144 pnie+liany
+  // tła — świat 3 „Obsydianowa Góra" (F3: mrok + łuna + granie)
+  { key: 'world3-sky', url: 'assets/bg/world3-sky.png' }, // 64×320 czerń→żar
+  { key: 'world3-far', url: 'assets/bg/world3-far.png' }, // 320×176 grań + rim light
+  { key: 'world3-near', url: 'assets/bg/world3-near.png' }, // 320×128 iglice + pęknięcia
   // tła jednolite PA (menu / światy 2-3), 64×64 tile
   { key: 'pa-blue', url: 'assets/bg/pa-blue.png' },
   { key: 'pa-brown', url: 'assets/bg/pa-brown.png' },
@@ -139,6 +150,10 @@ export const SPRITESHEETS: SpritesheetAsset[] = [
   // Pułapki animowane (PA1)
   { key: 'saw', url: 'assets/sprites/saw.png', frameWidth: 38, frameHeight: 38 }, // 8 kl.
   { key: 'platform-falling', url: 'assets/sprites/platform-falling.png', frameWidth: 32, frameHeight: 10 }, // 4 kl.
+  // znikająca platforma-liana (recolor platform-falling na pnącze — świat 2)
+  { key: 'platform-liana', url: 'assets/sprites/platform-liana.png', frameWidth: 32, frameHeight: 10 }, // 4 kl.
+  // pochodnia (monkey-jungle) — dekoracja świata 3
+  { key: 'torch', url: 'assets/sprites/torch.png', frameWidth: 32, frameHeight: 32 }, // 4 kl.
 
   // Kafle terenu (cięte jako spritesheet 16×16; indeks = wiersz*kolumny + kolumna)
   // terrain-pa: 22×11 kafli. Kluczowe: trawa-góra (6,0)-(8,0); ziemia-środek (7,1);
@@ -148,6 +163,10 @@ export const SPRITESHEETS: SpritesheetAsset[] = [
   // piasek-środek (1,1); krawędzie (0,1)/(2,1); dół (0,2)-(2,2); kolumna (4,0)-(4,2);
   // platforma 1-kratkowa (0,4)-(2,4), solo (4,4).
   { key: 'terrain-sand', url: 'assets/tiles/terrain-sand.png', frameWidth: 16, frameHeight: 16 },
+  // terrain-jungle (monkey-jungle, złożony w TEN SAM układ 17×5 co terrain-sand)
+  { key: 'terrain-jungle', url: 'assets/tiles/terrain-jungle.png', frameWidth: 16, frameHeight: 16 },
+  // terrain-obsidian (recolor terrain-sand: grafit + żar) — układ 17×5 jw.
+  { key: 'terrain-obsidian', url: 'assets/tiles/terrain-obsidian.png', frameWidth: 16, frameHeight: 16 },
   // palms: siatka 48×48, rząd 0: back-palma kołysząca kl. 0-3, back-lewa kl. 4, back-prawa kl. 5;
   // rząd 1: front-korony kl. 6-9, pień+trawa (tileset 48×48) kl. 10.
   { key: 'palms', url: 'assets/tiles/palms.png', frameWidth: 48, frameHeight: 48 },

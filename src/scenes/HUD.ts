@@ -12,6 +12,7 @@ interface HudState {
   crystals: number; crystalTotal: number;
   arrows: number; magic: number; diamonds: number;
   arena?: { name: string; hp: number; maxHp: number; portraitKey: string } | null;
+  runner?: { progress: number } | null;
 }
 
 interface FlightEvent {
@@ -44,6 +45,10 @@ export class HUDScene extends Phaser.Scene {
   private timerText!: Phaser.GameObjects.Text;
   private portrait!: Phaser.GameObjects.Sprite;
   private maxHp = 6;
+  // runner: pasek postępu (aneks 9.3 — wiersz 1 w runnerze)
+  private runnerBox!: Phaser.GameObjects.Container;
+  private runnerFill!: Phaser.GameObjects.Rectangle;
+  private runnerHead!: Phaser.GameObjects.Sprite;
 
   constructor() {
     super('HUD');
@@ -129,6 +134,17 @@ export class HUDScene extends Phaser.Scene {
     }).setOrigin(0, 0.5);
     this.arenaBox.add([pframe, this.portrait, this.arenaName, this.timerText]);
 
+    // pasek postępu runnera (chowany poza fazą RUNNER)
+    this.runnerBox = this.add.container(0, 0).setDepth(5).setVisible(false);
+    const rframe = this.add.nineslice(320, 56, 'ui-panel', undefined, 344, 18, 6, 6, 6, 6);
+    const rbg = this.add.rectangle(320, 56, 328, 8, 0x191430).setStrokeStyle(1, 0x000000, 0.6);
+    this.runnerFill = this.add.rectangle(156, 56, 1, 6, COLN.gold).setOrigin(0, 0.5);
+    // znacznik biegnącej bohaterki na pasku (mini-kryształ jako wskaźnik mety)
+    const goal = this.add.sprite(484 + 6, 56, 'crystal', 0).setScale(0.6);
+    goal.play('crystal-spin');
+    this.runnerHead = this.add.sprite(156, 56, 'ui-star', 0).setScale(0.8);
+    this.runnerBox.add([rframe, rbg, this.runnerFill, goal, this.runnerHead]);
+
     // zdarzenia z Level
     const ev = level.events;
     const on = (name: string, fn: (...args: never[]) => void) => {
@@ -143,6 +159,9 @@ export class HUDScene extends Phaser.Scene {
     on('hud:hp', (d: { hp: number }) => this.setHp(d.hp));
     on('hud:timer', (d: { remaining: number; warning: boolean }) => this.setTimer(d));
     on('hud:arena-end', () => this.arenaBox.setVisible(false));
+    on('hud:runner-start', () => this.runnerBox.setVisible(true));
+    on('hud:runner', (d: { progress: number }) => this.setRunnerProgress(d.progress));
+    on('hud:runner-end', () => this.runnerBox.setVisible(false));
     on('hud:magic-flash', () => this.flash(this.magicText, COLN.cyan));
     on('hud:steal-flash', () => this.flash(this.arrowText, COLN.danger));
     on('hud:heart-break', () => this.heartBreak());
@@ -150,6 +169,10 @@ export class HUDScene extends Phaser.Scene {
     const st0 = level.getHudState();
     this.applyState(st0);
     if (st0.arena) this.showArena(st0.arena);   // wejście dev-paramem ?arena=1
+    if (st0.runner) {
+      this.runnerBox.setVisible(true);
+      this.setRunnerProgress(st0.runner.progress);
+    }
   }
 
   private mono(x: number, y: number, str: string, color: string, size: number):
@@ -296,6 +319,14 @@ export class HUDScene extends Phaser.Scene {
         });
       }
     }
+  }
+
+  /** pasek postępu runnera: wypełnienie + znacznik bohaterki */
+  private setRunnerProgress(progress: number): void {
+    const p = Math.max(0, Math.min(1, progress));
+    const w = Math.max(1, Math.round(328 * p));
+    this.runnerFill.width = w;
+    this.runnerHead.x = 156 + w;
   }
 
   private setTimer(d: { remaining: number; warning: boolean }): void {

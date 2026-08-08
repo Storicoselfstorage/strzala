@@ -107,9 +107,13 @@ export const ANIMS: AnimDef[] = [
   // ── Pułapki ──
   { key: 'saw-spin', textureKey: 'saw', frames: { start: 0, end: 7 }, frameRate: 20, repeat: -1 },
   { key: 'platform-falling-on', textureKey: 'platform-falling', frames: { start: 0, end: 3 }, frameRate: 8, repeat: -1 },
+  // znikająca platforma-liana (świat 2 — mosty z lian)
+  { key: 'platform-liana-on', textureKey: 'platform-liana', frames: { start: 0, end: 3 }, frameRate: 8, repeat: -1 },
 
   // ── Dekoracje ──
   { key: 'palm-sway', textureKey: 'palms', frames: { start: 0, end: 3 }, frameRate: 6, repeat: -1 },
+  // pochodnia (świat 3)
+  { key: 'torch-flame', textureKey: 'torch', frames: { start: 0, end: 3 }, frameRate: 8, repeat: -1 },
 
   // ── Smoki (6 × 7 animacji; mapa wierszy arkusza — patrz nagłówek pliku) ──
   ...dragonAnims('miraz'),
