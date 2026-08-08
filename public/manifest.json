@@ -1,0 +1,15 @@
+{
+  "name": "STRZA/ŁA: Łowczynie Smoków",
+  "short_name": "STRZA/ŁA",
+  "description": "Pixel-artowa platformówka: uwolnij smoki spod złego czaru!",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#0b0b14",
+  "theme_color": "#0b0b14",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
