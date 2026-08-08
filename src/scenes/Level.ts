@@ -306,6 +306,7 @@ export class LevelScene extends Phaser.Scene {
     } else {
       this.map = parseMap(MAPS[this.levelId], this.levelId);
     }
+    this.thinStaticHazards();
 
     this.lives = this.diff.lives[this.charId];
     this.maxHearts = this.diff.outHearts > 0 ? this.diff.outHearts : this.diff.arenaHearts[this.charId];
@@ -378,7 +379,24 @@ export class LevelScene extends Phaser.Scene {
       this.player.respawn(t.x + 24, (standRow(this.map, t.c) + 1) * TILE);
       this.startArena(true);
     }
-    devMark({ scene: 'Level', level: this.levelId, phase: this.phase, dragonHits: 0 });
+    // dev: ?px=45 → gracz na kolumnie 45; ?ex=40 → Echo na kolumnie 40
+    // (e2e poprawek z playtestu: kadr gęstości kaktusów, skok Echo nad kolcami)
+    const qPx = devParam('px');
+    if (qPx && !arenaJump && !isRunner && this.phase === 'PLATFORM') {
+      const c = parseInt(qPx, 10);
+      if (Number.isFinite(c)) {
+        this.player.respawn(c * TILE + 8, (standRow(this.map, c) + 1) * TILE);
+      }
+    }
+    const qEx = devParam('ex');
+    if (qEx && this.echoE) {
+      const c = parseInt(qEx, 10);
+      if (Number.isFinite(c)) this.echoE.logic.x = c * TILE + 8;
+    }
+    devMark({
+      scene: 'Level', level: this.levelId, phase: this.phase, dragonHits: 0,
+      cacti: this.map.cacti.length, spikes: this.map.spikes.length,
+    });
   }
 
   /** świat platformowy z ParsedMap (fazy PLATFORM/ARENA; też areny po runnerze) */
@@ -567,6 +585,44 @@ export class LevelScene extends Phaser.Scene {
     if (right) return 2 * 17 + 0;
     if (left) return 2 * 17 + 2;
     return 2 * 17 + 4;    // kolumna dół
+  }
+
+  /**
+   * ŁATWY naprawdę łatwiejszy — zgłoszenie zamawiającej (playtest rodzinny,
+   * 7 lat): „jest tam za dużo kaktusów". Sekcja 8.7 różnicuje serca/HP/timery,
+   * ale nie gęstość przeszkód na planszach — wyrównujemy to TUTAJ, przy
+   * spawnie: na ŁATWYM pomijamy co drugi statyczny hazard mapy (kaktus /
+   * kolczasty krzak / lawowy kaktus / pas kolców `^`), w Trybie Skrzat
+   * (niezależny przełącznik) usuwamy 2 z 3. Deterministycznie w kolejności
+   * czytania mapy — układ stabilny między uruchomieniami. Kolce liczymy pasami
+   * (ciągły odcinek `^^^` = jedna przeszkoda, jak w tabeli 8.6).
+   * NIE ruszamy: pułapek fabularnych `!` (skrypt Echo/2-2), przeszkód
+   * RUNNERÓW (trudność reguluje tam core wg 8.7: runnerV0/Vmax/AccEvery),
+   * lawy (integralna część świata 3), gejzerów i głazów (telegrafowane).
+   * Mapy ASCII i walidatory ekonomii zostają nietknięte — przerzedzamy
+   * wyłącznie sparsowaną kopię tej sceny.
+   */
+  private thinStaticHazards(): void {
+    const keepEvery = this.save.skrzat ? 3 : this.diffId === 'LATWY' ? 2 : 1;
+    if (keepEvery === 1) return;
+    const m = this.map;
+    m.cacti = m.cacti.filter((_, i) => i % keepEvery === 0);
+    m.cactusCells = new Set();
+    for (const k of m.cacti) {
+      m.cactusCells.add(cellKey(k.r, k.c));
+      m.cactusCells.add(cellKey(k.r - 1, k.c));
+    }
+    // kolce: grupuj przylegające `^` (ten sam wiersz, kolejne kolumny) w pasy
+    let strip = -1;
+    let prevR = -9;
+    let prevC = -9;
+    m.spikes = m.spikes.filter((s) => {
+      if (s.r !== prevR || s.c !== prevC + 1) strip++;
+      prevR = s.r;
+      prevC = s.c;
+      return strip % keepEvery === 0;
+    });
+    m.spikeCells = new Set(m.spikes.map((s) => cellKey(s.r, s.c)));
   }
 
   private buildTerrain(): void {
@@ -1175,6 +1231,8 @@ export class LevelScene extends Phaser.Scene {
       playerX: Math.round(this.player.cx),
       playerY: Math.round(this.player.body.y),
       crystals: this.crystals,
+      echoJump: this.echoE?.jumping ?? false,
+      echoX: this.echoE ? Math.round(this.echoE.logic.x) : -1,
       thiefActive: !!this.thiefE, thiefX: this.thiefE ? Math.round(this.thiefE.logic.x) : -1,
       dragonState: this.combat?.dragon.state ?? '',
       dragonX: this.combat ? Math.round(this.combat.dragon.x) : -1,
@@ -1940,12 +1998,51 @@ export class LevelScene extends Phaser.Scene {
     for (const ev of events) {
       if (ev.type === 'returned') this.toast('Echo wróciła do drużyny!', 2000);
     }
+    this.checkEchoJump(dt);
     const whistles = this.echoE.logic.checkWhistle(this.hazardXs, env);
     for (const w of whistles) {
       if (w.type !== 'whistle') continue;
       this.echoE.hop(this);
       this.sfx('sfx-echo-whistle', w.first ? 0.55 : 0.35);
     }
+  }
+
+  /**
+   * Skok Echo nad hazardem naziemnym — zgłoszenie z playtestu rodzinnego
+   * (1-2): Echo „stawała jak słupek" przed kolcami albo przez nie przenikała.
+   * Warstwa sceny: core/monkey.ts (cel/podążanie) nietknięty — my tylko
+   * wykrywamy hazard w pasie 1–3 kolumn PRZED Echo w kierunku jej ruchu
+   * i odpalamy wizualny łuk (EchoEntity.tryJump) + kurz przy lądowaniu.
+   * Wymóg ruchu (próg prędkości) + cooldown w EchoEntity = zero nerwowego
+   * podskakiwania, gdy Echo stoi przy hazardzie obok celu podążania.
+   */
+  private checkEchoJump(dt: number): void {
+    const e = this.echoE;
+    if (!e || e.waiting || e.jumping || dt <= 0) return;
+    const l = e.logic;
+    if (l.state !== 'follow' && l.state !== 'fleeing') return;
+    const v = e.lastStepX / dt;
+    if (Math.abs(v) < 40) return;   // stoi / dojeżdża do celu — nie skacz
+    const dir = v > 0 ? 1 : -1;
+    const ec = Math.floor(l.x / TILE);
+    const er = Math.floor(l.y / TILE) - 1;   // wiersz, w którym stoi (l.y = stopy)
+    for (let ahead = 1; ahead <= 3; ahead++) {
+      if (this.groundHazardAt(er, ec + dir * ahead)) {
+        e.tryJump((x, y) => this.emDust.explode(4, x, y - 2));
+        return;
+      }
+    }
+  }
+
+  /** hazard naziemny w kolumnie c przy wierszu r (±1 na progi terenu):
+   *  kaktus (zwykły/krzak/lawowy), kolce `^`, AKTYWNE kolce pułapek `!` */
+  private groundHazardAt(r: number, c: number): boolean {
+    for (let rr = r - 1; rr <= r + 1; rr++) {
+      const k = cellKey(rr, c);
+      if (this.map.cactusCells.has(k) || this.map.spikeCells.has(k)
+        || this.trapCells.has(k)) return true;
+    }
+    return false;
   }
 
   private echoFlee(): void {
