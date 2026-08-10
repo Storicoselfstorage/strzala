@@ -9,6 +9,7 @@ import Phaser from 'phaser';
 import { loadSave, localStorageAdapter, writeSave } from '../core/save';
 import { FINALE_LINES, INTRO_LINES, WORLD_TRANSITIONS } from '../data/texts';
 import { addSkyBackdrop, Backdrop, COL, COLN, FONT_TITLE, FONT_UI } from '../ui/theme';
+import { speakText, stopSpeech } from '../ui/speak';
 import { devMark } from '../dev';
 
 export type InterludeId = 'intro' | 'after-1-3' | 'after-2-3' | 'finale';
@@ -140,6 +141,7 @@ export class InterludeScene extends Phaser.Scene {
     this.shown = 0;
     this.typing = true;
     this.lineText.setText('');
+    speakText(this, this.lines[i]);   // lektor czyta równolegle z maszyną
     const speaker = speakerOf(this.lines[i]);
     for (const key of Object.keys(this.portraits) as Speaker[]) {
       this.portraits[key].setVisible(key === speaker);
@@ -189,6 +191,7 @@ export class InterludeScene extends Phaser.Scene {
 
   private finish(): void {
     this.finished = true;
+    stopSpeech();
     const st = localStorageAdapter();
     if (st) {
       const save = loadSave(st);

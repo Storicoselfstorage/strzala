@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { IMAGES, SPRITESHEETS, AUDIO } from '../data/assetManifest';
 import { ANIMS } from '../data/animations';
+import { VOICE_FILES } from '../data/voiceFiles';
 
 export class PreloadScene extends Phaser.Scene {
   constructor() {
@@ -38,6 +39,10 @@ export class PreloadScene extends Phaser.Scene {
       });
     }
     for (const audio of AUDIO) this.load.audio(audio.key, audio.url);
+    // lektor (Babcia Bożenka) — nagrania kwestii dialogowych
+    for (const [id, file] of Object.entries(VOICE_FILES)) {
+      this.load.audio(`voice:${id}`, `assets/audio/voice/${file}`);
+    }
   }
 
   create() {

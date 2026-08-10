@@ -38,6 +38,7 @@ export const IMAGES: ImageAsset[] = [
   { key: 'geyser-base', url: 'assets/sprites/geyser-base.png' }, // 16×16 podstawka gejzera (kolumna = particles)
   { key: 'spikes', url: 'assets/sprites/spikes.png' }, // 16×16 (PA1)
   { key: 'boulder', url: 'assets/sprites/boulder.png' }, // 42×42 (PA1 Rock Head idle)
+  { key: 'mound', url: 'assets/sprites/mound.png' }, // 16×16 kopczyk złodzieja (spec playtest2, gen. PA-style)
 
   // tła — świat 1 (parallax TileSprite)
   { key: 'world1-sky', url: 'assets/bg/world1-sky.png' }, // 384×128

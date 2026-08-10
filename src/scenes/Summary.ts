@@ -9,6 +9,7 @@ import Phaser from 'phaser';
 import { loadSave, localStorageAdapter, SaveData, writeSave } from '../core/save';
 import { LEVEL_ORDER, DRAGONS, DragonId } from '../data/levels';
 import { WIN_MESSAGES } from '../data/texts';
+import { speakText } from '../ui/speak';
 import { addSkyBackdrop, Backdrop, COL, FONT_TITLE, FONT_UI } from '../ui/theme';
 import { devMark } from '../dev';
 
@@ -95,6 +96,7 @@ export class SummaryScene extends Phaser.Scene {
       }).setOrigin(0, 0.5);
     } else {
       const msg = WIN_MESSAGES[1 + Math.floor(Math.random() * (WIN_MESSAGES.length - 1))];
+      speakText(this, msg);
       this.add.text(320, 252, msg, {
         fontFamily: FONT_UI, fontSize: '15px', color: COL.gold,
         stroke: COL.ink, strokeThickness: 3,

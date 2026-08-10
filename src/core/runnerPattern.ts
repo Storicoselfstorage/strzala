@@ -7,11 +7,23 @@
  * Współrzędne w px (kolumny patternu × 16).
  */
 import {
-  BOSS_GATE_CRYSTALS, DifficultySettings, PICKUP_RADIUS,
-  RUNNER_ACC_STEP, RUNNER_DECEL, RUNNER_PLAYER_X, RUNNER_STOP_EPS,
-  RUNNER_TAIL_PX, TILE,
+  BOSS_GATE_CRYSTALS, DIFFICULTY, DifficultyId, GearTable, PICKUP_RADIUS,
+  RUNNER_DECEL, RUNNER_GEAR_ACCEL, RUNNER_GEAR_THRESHOLDS, RUNNER_PLAYER_X,
+  RUNNER_STOP_EPS, RUNNER_TAIL_PX, RunnerId, SKRZAT_SPEED_SCALE, TILE,
 } from './balance';
 import { RUNNER_3_3_LINA_CUT } from '../data/levels';
+
+/**
+ * Tabela biegów dla runnera: trudność × runner (spec playtest2).
+ * Tryb Skrzat: baza ŁATWY × SKRZAT_SPEED_SCALE (0.7) niezależnie od trudności.
+ */
+export function runnerGearsFor(
+  diffId: DifficultyId, runnerId: RunnerId, skrzat: boolean,
+): GearTable {
+  const base = DIFFICULTY[skrzat ? 'LATWY' : diffId].runnerGears[runnerId];
+  if (!skrzat) return base;
+  return base.map((v) => v * SKRZAT_SPEED_SCALE) as unknown as GearTable;
+}
 
 export type RunnerObstacleKind = 'K' | 'n';
 
@@ -34,15 +46,16 @@ export class RunnerState {
   readonly arrowPacks: RunnerArrowPack[] = [];
   readonly trackLen: number;
   readonly crystalTotal: number;
-  private readonly diff: DifficultySettings;
+  /** prędkości docelowe biegów 1–4 (px/s) — patrz runnerGearsFor() */
+  readonly gears: GearTable;
   traveled = 0;
   time = 0;
   v = 0;
   done = false;
   decel = false;
 
-  constructor(pattern: string, diff: DifficultySettings, useLina = false) {
-    this.diff = diff;
+  constructor(pattern: string, gears: GearTable, useLina = false) {
+    this.gears = gears;
     const toks = (useLina ? cutLina(pattern) : pattern).trim().split(/\s+/);
     let x = 0;   // w kolumnach, jak v1
     for (const t of toks) {
@@ -77,11 +90,11 @@ export class RunnerState {
     this.reset();
   }
 
-  /** reset sekcji po śmierci: prędkość wraca do startowej (aneks 8.3) */
+  /** reset sekcji po śmierci: prędkość wraca do biegu 1 (spec playtest2) */
   reset(): void {
     this.traveled = 0;
     this.time = 0;
-    this.v = this.diff.runnerV0;
+    this.v = this.gears[0];
     this.done = false;
     this.decel = false;
     for (const o of this.obstacles) o.alive = true;
@@ -89,19 +102,27 @@ export class RunnerState {
     for (const a of this.arrowPacks) a.taken = false;
   }
 
+  /** bieg 1–4 z postępu trasy (progi RUNNER_GEAR_THRESHOLDS) */
+  get gear(): 1 | 2 | 3 | 4 {
+    const p = this.progress();
+    for (let i = RUNNER_GEAR_THRESHOLDS.length - 1; i >= 1; i--) {
+      if (p >= RUNNER_GEAR_THRESHOLDS[i]) return (i + 1) as 2 | 3 | 4;
+    }
+    return 1;
+  }
+
   update(dt: number): void {
     this.time += dt;
     if (this.decel) {
-      // koniec sekcji: scroll wytraca prędkość do 0 w ~2 s
+      // koniec sekcji: scroll wytraca prędkość do 0 w ≤ 2 s
       this.v = Math.max(0, this.v - RUNNER_DECEL * dt);
       this.traveled += this.v * dt;
       if (this.v <= RUNNER_STOP_EPS) this.done = true;
       return;
     }
-    // przyspieszenie: +1 kol/s (16 px/s) co runnerAccEvery sekund, do vmax
-    const steps = Math.floor(this.time / this.diff.runnerAccEvery);
-    this.v = Math.min(this.diff.runnerVmax,
-      this.diff.runnerV0 + steps * RUNNER_ACC_STEP);
+    // biegi z postępu trasy; zmiana biegu = rampa 48 px/s² (bez skoku w klatce)
+    const target = this.gears[this.gear - 1];
+    this.v = Math.min(target, this.v + RUNNER_GEAR_ACCEL * dt);
     this.traveled += this.v * dt;
     if (this.traveled >= this.trackLen) this.decel = true;
   }

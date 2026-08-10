@@ -15,19 +15,22 @@ import {
   BOULDER_FALL_SPEED, BOULDER_HIDDEN_TIME, BOULDER_LIE_TIME, BOULDER_TELEGRAPH,
   ENEMY_DROP_CHANCE, GEYSER_CYCLE, GEYSER_REST, GEYSER_WARN,
   PLAYER_H, POWERUP_MAGNET_R, POWERUP_MAGNET_TIME, POWERUP_SHIELD_TIME,
-  RUNNER_GROUND_Y, RUNNER_PLAYER_X, VANISH_BLINK_TIME, VANISH_GONE_TIME,
+  RUNNER_GROUND_Y, RUNNER_PLAYER_X, RunnerId,
+  VANISH_BLINK_TIME, VANISH_GONE_TIME,
 } from '../core/balance';
 import {
   cellKey, ParsedMap, parseMap, PickupKind, solidAt, standRow, sealWallCells,
   VanishSegment,
 } from '../core/mapParser';
 import { ArenaCombat, CombatEvent, Fireball, GroundFlame } from '../core/combat';
-import { ThiefSpawner } from '../core/thief';
+import {
+  Backpack, Loot, Mound, returnLoot, ThiefEvent, ThiefSpawner,
+} from '../core/thief';
 import { pickTrapsToActivate, recordLifeLoss } from '../core/monkey';
 import { loadSave, localStorageAdapter, SaveData, writeSave } from '../core/save';
 import {
   checkObstacleHit, collectRunnerPickups, GateState, gateRequirement,
-  runnerArrowHit, RunnerState,
+  runnerArrowHit, runnerGearsFor, RunnerState,
 } from '../core/runnerPattern';
 import { createSim, SimEnv, simStep, SimState } from '../core/physicsSim';
 import {
@@ -49,6 +52,14 @@ import { devMark, devParam } from '../dev';
 
 const GAME_FIELD_Y = 40;    // wiersz HUD 40 px NAD polem gry 320 px
 const FIELD_H = 320;
+
+import { SCENE_MESSAGES, THIEF_MESSAGES as THIEF_MSG } from '../data/texts';
+import { speakText, speakTexts, stopSpeech } from '../ui/speak';
+
+/** rate muzyki per bieg runnera (spec playtest2: 1.00 / 1.04 / 1.08 / 1.12) */
+const GEAR_MUSIC_RATE = [1.0, 1.04, 1.08, 1.12] as const;
+/** linie prędkości: kreski na sekundę dla biegów 1–4 (od biegu 2) */
+const GEAR_LINES_PER_S = [0, 2, 4, 6] as const;
 
 /** tint wariantów świata 3 (aneks 6.3: ognisty nietoperz / lawowa żabka) */
 const WORLD3_ENEMY_TINT = 0xffa080;
@@ -85,13 +96,6 @@ interface TrapEntity {
   c: number; x: number;
   state: 'hidden' | 'telegraph' | 'active';
   t: number;
-  sprite: Phaser.GameObjects.Image;
-}
-
-interface LootDrop {
-  kind: 'cake' | 'arrow' | 'diamond';
-  count: number;
-  x: number; y: number; ttl: number;
   sprite: Phaser.GameObjects.Image;
 }
 
@@ -194,9 +198,15 @@ export class LevelScene extends Phaser.Scene {
   private echoE: EchoEntity | null = null;
   private thiefE: ThiefEntity | null = null;
   private thiefSpawner = new ThiefSpawner();
-  private lootDrops: LootDrop[] = [];
+  /** kopczyk z zakopanym łupem (spec playtest2) — maks. 1, bez TTL */
+  private mound: Mound | null = null;
+  private moundSprite: Phaser.GameObjects.Image | null = null;
+  private moundBar: Phaser.GameObjects.Rectangle | null = null;
+  private thiefEdgeMsgShown = false;
+  private thiefPantT = 0;
   private arrowPool: ArrowShot[] = [];
   private warnArrow!: Phaser.GameObjects.Image;
+  private warnDollar: Phaser.GameObjects.Text | null = null;
   private warnT = 0;
   private warnSide: -1 | 1 = 1;
   private skyLayers: Array<{ ts: Phaser.GameObjects.TileSprite; factor: number; drift: number }> = [];
@@ -241,6 +251,11 @@ export class LevelScene extends Phaser.Scene {
   private rnFinished = false;
   private rnWasGround = true;
   private rnLastProgress = -1;
+  /** system biegów (spec playtest2): fanfara / chevrony / rate muzyki / linie */
+  private rnLastGear = 1;
+  private rnMusicRate = 1;
+  private rnLines: Array<{ rect: Phaser.GameObjects.Rectangle; alive: boolean }> = [];
+  private rnLineSpawnT = 0;
   private gateLogic: GateState | null = null;
   private gateCont: Phaser.GameObjects.Container | null = null;
   private gateGlow: Phaser.GameObjects.Rectangle | null = null;
@@ -356,6 +371,7 @@ export class LevelScene extends Phaser.Scene {
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.musicWorld?.stop();
       this.musicDragon?.stop();
+      stopSpeech();
       this.game.registry.set('touch.runnerMode', false);
       this.game.registry.set('touch.ctxUse', false);
     });
@@ -450,7 +466,12 @@ export class LevelScene extends Phaser.Scene {
     this.echoE = null;
     this.thiefE = null;
     this.thiefSpawner = new ThiefSpawner();
-    this.lootDrops = [];
+    this.mound = null;
+    this.moundSprite = null;
+    this.moundBar = null;
+    this.thiefEdgeMsgShown = false;
+    this.thiefPantT = 0;
+    this.warnDollar = null;
     this.arrowPool = [];
     this.skyLayers = [];
     this.combat = null;
@@ -494,6 +515,10 @@ export class LevelScene extends Phaser.Scene {
     this.rnFinished = false;
     this.rnWasGround = true;
     this.rnLastProgress = -1;
+    this.rnLastGear = 1;
+    this.rnMusicRate = 1;
+    this.rnLines = [];
+    this.rnLineSpawnT = 0;
     this.gateLogic = null;
     this.gateCont = null;
     this.gateGlow = null;
@@ -598,7 +623,7 @@ export class LevelScene extends Phaser.Scene {
    * czytania mapy — układ stabilny między uruchomieniami. Kolce liczymy pasami
    * (ciągły odcinek `^^^` = jedna przeszkoda, jak w tabeli 8.6).
    * NIE ruszamy: pułapek fabularnych `!` (skrypt Echo/2-2), przeszkód
-   * RUNNERÓW (trudność reguluje tam core wg 8.7: runnerV0/Vmax/AccEvery),
+   * RUNNERÓW (trudność reguluje tam core: tabela biegów runnerGears),
    * lawy (integralna część świata 3), gejzerów i głazów (telegrafowane).
    * Mapy ASCII i walidatory ekonomii zostają nietknięte — przerzedzamy
    * wyłącznie sparsowaną kopię tej sceny.
@@ -975,6 +1000,27 @@ export class LevelScene extends Phaser.Scene {
     this.warnArrow = this.add.image(616, 150, 'ui-arrows', 1)
       .setScrollFactor(0).setDepth(50).setTint(COLN.purple).setScale(1.5)
       .setVisible(false);
+    // marker `$` przy strzałce: pościg za łupem / kierunek do kopczyka
+    this.warnDollar = this.add.text(616, 150, '$', {
+      fontFamily: FONT_TITLE, fontSize: '12px', color: COL.gold,
+      stroke: COL.ink, strokeThickness: 4,
+    }).setOrigin(0.5).setScrollFactor(0).setDepth(50).setVisible(false);
+    this.ensureThiefBackpackTexture();
+  }
+
+  /** mini-plecak 12×14 px nad głową złodzieja (tekstura generowana w locie —
+   *  bez nowego assetu; styl PA: kontur + korpus + klapa + złota klamra) */
+  private ensureThiefBackpackTexture(): void {
+    if (this.textures.exists('thief-backpack')) return;
+    const g = this.add.graphics().setVisible(false);
+    g.fillStyle(0x3a2504); g.fillRect(2, 0, 2, 3); g.fillRect(8, 0, 2, 3); // szelki
+    g.fillStyle(0x22223a); g.fillRect(0, 2, 12, 12);                       // kontur
+    g.fillStyle(0x8a5a2c); g.fillRect(1, 3, 10, 10);                       // korpus
+    g.fillStyle(0xc08a4a); g.fillRect(1, 3, 10, 4);                        // klapa
+    g.fillStyle(0xa87038); g.fillRect(3, 8, 6, 4);                         // kieszeń
+    g.fillStyle(0xffd23f); g.fillRect(5, 6, 2, 2);                         // klamra
+    g.generateTexture('thief-backpack', 12, 14);
+    g.destroy();
   }
 
   private setupCamera(): void {
@@ -1058,7 +1104,9 @@ export class LevelScene extends Phaser.Scene {
   }
 
   private toast(text: string, ms = 2000): void {
-    if (text) this.events.emit('hud:toast', { text, ms });
+    if (!text) return;
+    this.events.emit('hud:toast', { text, ms });
+    speakText(this, text);   // lektor czyta komunikaty mające nagranie
   }
 
   private hudLabel(): string {
@@ -1206,10 +1254,10 @@ export class LevelScene extends Phaser.Scene {
     this.updateHazards();
     this.updateEnemies(dt);
     this.updateEcho(dt);
-    this.updateLoot(dt);
 
     if (this.phase === 'PLATFORM') {
       this.updateThief(dt);
+      this.updateMound(dt);
       // trigger areny (typ B i BOSS)
       if (this.map.trigger
         && (this.def.kind === 'ARENA' || this.def.kind === 'BOSS')
@@ -1235,6 +1283,12 @@ export class LevelScene extends Phaser.Scene {
       echoJump: this.echoE?.jumping ?? false,
       echoX: this.echoE ? Math.round(this.echoE.logic.x) : -1,
       thiefActive: !!this.thiefE, thiefX: this.thiefE ? Math.round(this.thiefE.logic.x) : -1,
+      thiefState: this.thiefE?.logic.state ?? '',
+      thiefBounces: this.thiefE?.logic.bounces ?? 0,
+      thiefLoot: !!this.thiefE?.logic.loot,
+      mound: !!this.mound,
+      moundX: this.mound ? Math.round(this.mound.x + 8) : -1,
+      arrows: this.arrows,
       dragonState: this.combat?.dragon.state ?? '',
       dragonX: this.combat ? Math.round(this.combat.dragon.x) : -1,
       dragonHits: this.dragonHits,
@@ -1444,7 +1498,7 @@ export class LevelScene extends Phaser.Scene {
           const feet = (standRow(this.map, Math.floor(this.player.cx / TILE),
             (rr, cc) => this.extraSolid.has(cellKey(rr, cc))) + 1) * TILE;
           this.echoE = new EchoEntity(this, this.player.cx - 32, feet, false);
-          this.toast('Placek odbity! Echo wraca do drużyny!', 2600);
+          this.toast(SCENE_MESSAGES.placekRecovered, 2600);
           this.sfx('sfx-echo-whistle', 0.55);
         } else {
           this.toast('Legendarny Placek w plecaku. Pilnuj go!', 2200);
@@ -1477,7 +1531,7 @@ export class LevelScene extends Phaser.Scene {
     if (this.echoE && this.echoE.logic.canRetameWithCake(this.player.cx)) {
       this.hasCake = false;
       this.echoE.logic.comeBack();
-      this.toast('Echo wraca za placek!', 2200);
+      this.toast(SCENE_MESSAGES.echoReturn, 2200);
       this.sfx('sfx-echo-whistle', 0.5);
     } else if (this.hearts < this.maxHearts) {
       this.hasCake = false;
@@ -1485,7 +1539,7 @@ export class LevelScene extends Phaser.Scene {
       this.toast(EVENT_MESSAGES.placekPiece, 2200);
       this.sfx('sfx-gate-open', 0.4);
     } else {
-      this.toast('Placek zostaw na gorsze czasy (pełne serca).', 1800);
+      this.toast(SCENE_MESSAGES.placekLater, 1800);
       return;
     }
     this.emitHud();
@@ -1776,6 +1830,7 @@ export class LevelScene extends Phaser.Scene {
 
   private deathOverlay(): void {
     const msg = LOSS_MESSAGES[Math.floor(Math.random() * LOSS_MESSAGES.length)];
+    speakTexts(this, [msg.header, msg.line]);
     const heartsRow = '♥ '.repeat(Math.max(0, this.lives)).trim() || '♡';
     const cont = this.overlayBox([
       { text: msg.header, size: 15, color: COL.danger },
@@ -1801,6 +1856,7 @@ export class LevelScene extends Phaser.Scene {
   private gameOverOverlay(): void {
     this.musicWorld?.stop();
     this.musicDragon?.stop();
+    speakTexts(this, [GAME_OVER.header, GAME_OVER.line]);
     const cont = this.overlayBox([
       { text: GAME_OVER.header, size: 16, color: COL.gold },
       { text: GAME_OVER.line, size: 15, color: COL.white },
@@ -1889,8 +1945,8 @@ export class LevelScene extends Phaser.Scene {
       this.thiefE = null;
     }
     this.thiefSpawner.reset();
-    for (const l of this.lootDrops) l.sprite.destroy();
-    this.lootDrops = [];
+    // śmierć cofa kradzież (plecak ze snapshotu) — kopczyk znika bez śladu
+    this.destroyMound();
     if (this.echoE) {
       this.echoE.destroy();
       this.echoE = null;
@@ -2087,61 +2143,59 @@ export class LevelScene extends Phaser.Scene {
       this.warnSide = spawn.warnSide;
       this.sfx('sfx-theft-alarm', 0.55);
     }
-    // wskaźnik-strzałka na krawędzi ekranu (kolor złodzieja)
-    this.warnT = Math.max(0, this.warnT - dt);
-    let showWarn = false;
-    let side: -1 | 1 = this.warnSide;
-    if (this.thiefE && this.thiefE.logic.alive) {
-      const sx = this.thiefE.logic.x - this.cameras.main.scrollX;
-      if (sx < -8) { showWarn = true; side = -1; }
-      else if (sx > 648) { showWarn = true; side = 1; }
-      else if (this.warnT > 0) { showWarn = true; }
-    } else if (this.warnT > 0 && this.thiefE) {
-      showWarn = true;
-    }
-    this.warnArrow.setVisible(showWarn
-      && Math.floor(this.time.now / 160) % 3 !== 2);
-    if (showWarn) {
-      this.warnArrow.setFrame(side > 0 ? 1 : 3);
-      this.warnArrow.x = side > 0 ? 616 : 24;
-      this.warnArrow.y = 140;
-    }
+    this.updateWarnMarker(dt);
 
     if (!this.thiefE) return;
     const events = this.thiefE.update(dt, this.thiefEnv());
-    for (const ev of events) {
-      if (ev.type === 'escaped') {
-        if (ev.loot) this.toast('Złodziej uciekł z łupem...', 2200);
-        this.emSmoke.explode(6, this.thiefE.logic.x + 8, this.thiefE.logic.y + 16);
-        this.thiefE.destroy();
-        this.thiefE = null;
-        this.thiefSpawner.noteDespawn({ cooldownAfterDespawn: this.def.thiefCd ?? this.diff.thiefCd });
-        return;
+    for (const ev of events) this.handleThiefEvent(ev);
+    if (!this.thiefE) return;   // buried/vanished w tej klatce
+
+    const logic = this.thiefE.logic;
+    // zmęczony: sapanie co 2 s (cicho); kopanie: kurz grzebania
+    if (logic.state === 'tired') {
+      this.thiefPantT -= dt;
+      if (this.thiefPantT <= 0) {
+        this.thiefPantT = 2;
+        if (this.cache.audio.exists('sfx-land')) {
+          this.sound.play('sfx-land', { volume: 0.15, rate: 0.6 });
+        }
+      }
+    } else if (logic.state === 'dig') {
+      if (Math.floor(this.time.now / 140) % 2 === 0) {
+        this.emDust.explode(2, logic.x + 8, logic.y + 30);
       }
     }
+
     // dotknięcie gracza
     const tr = this.thiefE.rect();
     const pb = this.player.body;
     const overlap = pb.x < tr.x + tr.w && tr.x < pb.x + pb.width
       && pb.y < tr.y + tr.h && tr.y < pb.y + pb.height;
     if (overlap) {
-      const logic = this.thiefE.logic;
       if (logic.state === 'approach' && this.powerup?.kind === 'shield') {
         // tarcza: 100% ochrony przed kradzieżą (aneks 7) — złodziej zmyka z niczym
-        logic.steal({ arrows: 0, hasCake: false, diamondsLevel: 0 }, false, this.map.widthPx);
+        logic.steal({ arrows: 0, magic: 0, hasCake: false, diamondsLevel: 0 },
+          false, this.map.widthPx);
         this.toast('Tarcza ochroniła plecak!', 2000);
         this.sfx('sfx-shield-clink', 0.5);
       } else if (logic.state === 'approach') {
-        const bp = { arrows: this.arrows, hasCake: this.hasCake, diamondsLevel: this.diamondsLevel };
-        const ev = logic.steal(bp, this.char.protectedBackpack, this.map.widthPx);
-        const stolenDiamond = this.diamondsLevel - bp.diamondsLevel;
+        // kradzież CAŁEGO plecaka (Vega: 1 strzała; Skrzat: ≤ 3 strzały)
+        const bp: Backpack = {
+          arrows: this.arrows, magic: this.magic,
+          hasCake: this.hasCake, diamondsLevel: this.diamondsLevel,
+        };
+        const ev = logic.steal(bp, this.char.protectedBackpack, this.map.widthPx,
+          this.save.skrzat);
+        const stolenDiamonds = this.diamondsLevel - bp.diamondsLevel;
         this.arrows = bp.arrows;
+        this.magic = bp.magic;
         this.hasCake = bp.hasCake;
         this.diamondsLevel = bp.diamondsLevel;
-        this.diamondsTotal -= stolenDiamond;
+        this.diamondsTotal -= stolenDiamonds;
         if (ev.type === 'stole' && ev.loot) {
-          this.thiefE.showLoot(ev.loot.kind);
-          this.toast(ev.cakeStolen ? EVENT_MESSAGES.theftPlacek : 'ŁAP GO!', 2400);
+          this.thiefE.showLoot(ev.loot);
+          this.toast(this.char.protectedBackpack
+            ? THIEF_MSG.stoleVega : THIEF_MSG.stoleAll, 2400);
           this.events.emit('hud:steal-flash');
           this.sfx('sfx-theft-alarm', 0.6);
           if (ev.cakeStolen) this.echoFlee();
@@ -2149,27 +2203,111 @@ export class LevelScene extends Phaser.Scene {
           this.toast('Pusty plecak — złodziej zmyka.', 1800);
         }
         this.emitHud();
-      } else {
+      } else if (logic.catchableByTouch()
+          && logic.y + 2 * TILE > pb.y + 14) {
+        // flee/tired/dig: dotknięcie = złapanie (dig: bezbronny — pełny zwrot).
+        // Karencja po kradzieży (kradzież zachodzi w overlapie z graczem) oraz
+        // przelot NAD głową (stopy złodzieja powyżej piersi bohaterki) nie
+        // łapią — spec: „przeleciał mi nad głową", złapanie wymaga wyczucia
+        // (podskoku w niego) albo strzały.
         this.thiefCaught();
       }
     }
   }
 
+  /** wskaźnik-strzałka na krawędzi ekranu: sygnalizacja `!`, pościg za łupem
+   *  (`$` przy strzałce) i kierunek do kopczyka poza kadrem (spec playtest2) */
+  private updateWarnMarker(dt: number): void {
+    this.warnT = Math.max(0, this.warnT - dt);
+    let showWarn = false;
+    let dollar = false;
+    let side: -1 | 1 = this.warnSide;
+    const scrollX = this.cameras.main.scrollX;
+    if (this.thiefE && this.thiefE.logic.alive) {
+      const sx = this.thiefE.logic.x - scrollX;
+      if (sx < -8) { showWarn = true; side = -1; }
+      else if (sx > 648) { showWarn = true; side = 1; }
+      else if (this.warnT > 0) { showWarn = true; }
+      dollar = showWarn && !!this.thiefE.logic.loot && (sx < -8 || sx > 648);
+    } else if (this.warnT > 0 && this.thiefE) {
+      showWarn = true;
+    } else if (this.mound) {
+      const sx = this.mound.x + 8 - scrollX;
+      if (sx < -8) { showWarn = true; side = -1; dollar = true; }
+      else if (sx > 648) { showWarn = true; side = 1; dollar = true; }
+    }
+    const blink = Math.floor(this.time.now / 160) % 3 !== 2;
+    this.warnArrow.setVisible(showWarn && blink);
+    if (showWarn) {
+      this.warnArrow.setFrame(side > 0 ? 1 : 3);
+      this.warnArrow.x = side > 0 ? 616 : 24;
+      this.warnArrow.y = 140;
+    }
+    if (this.warnDollar) {
+      this.warnDollar.setVisible(dollar && blink);
+      if (dollar) this.warnDollar.setPosition(side > 0 ? 594 : 46, 140);
+    }
+  }
+
+  /** zdarzenia FSM złodzieja (core/thief.ts) → efekty sceny */
+  private handleThiefEvent(ev: ThiefEvent): void {
+    if (!this.thiefE) return;
+    const logic = this.thiefE.logic;
+    switch (ev.type) {
+      case 'turned': {
+        // zawrotka na krawędzi mapy / ścianie areny: obłoczek poślizgu + skid
+        this.emDust.explode(6, logic.x + 8, logic.y + 30);
+        if (this.cache.audio.exists('sfx-land')) {
+          this.sound.play('sfx-land', { volume: 0.35, rate: 1.4 });
+        }
+        if (!this.thiefEdgeMsgShown) {
+          this.thiefEdgeMsgShown = true;
+          this.toast(THIEF_MSG.edge, 2200);
+        }
+        break;
+      }
+      case 'tired':
+        this.thiefPantT = 0;   // sapanie zaczyna od razu
+        break;
+      case 'digStart':
+        break;   // toast dopiero przy kopczyku (buried)
+      case 'buried': {
+        this.createMound(ev.mound.x, ev.mound.y, ev.mound.loot);
+        this.toast(THIEF_MSG.buried, 2600);
+        this.emSmoke.explode(8, logic.x + 8, logic.y + 16);
+        this.sfx('sfx-theft-alarm', 0.4);
+        this.thiefE.destroy();
+        this.thiefE = null;
+        this.thiefSpawner.noteDespawn({
+          cooldownAfterDespawn: this.def.thiefCd ?? this.diff.thiefCd,
+        });
+        break;
+      }
+      case 'vanished': {
+        // pusty łup: znika w obłoczku, kopczyk NIE powstaje
+        this.emSmoke.explode(6, logic.x + 8, logic.y + 16);
+        this.thiefE.destroy();
+        this.thiefE = null;
+        this.thiefSpawner.noteDespawn({
+          cooldownAfterDespawn: this.def.thiefCd ?? this.diff.thiefCd,
+        });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  /** złapanie żywego złodzieja: łup wraca PROSTO do plecaka (+50, bez dropu) */
   private thiefCaught(): void {
     if (!this.thiefE) return;
     const logic = this.thiefE.logic;
     const ev = logic.caught();
     if (ev.type === 'caught') {
       this.addScore(ev.score, logic.x + 8, logic.y, COL.purple);
-      if (ev.drop) {
-        const img = this.add
-          .image(ev.drop.x + 8, ev.drop.y + TILE, this.lootTexture(ev.drop.kind))
-          .setDepth(-30);
-        if (ev.drop.kind === 'arrow') img.setRotation(-Math.PI / 4);
-        this.lootDrops.push({
-          kind: ev.drop.kind, count: ev.drop.count,
-          x: ev.drop.x + 8, y: ev.drop.y + TILE, ttl: ev.drop.ttl, sprite: img,
-        });
+      if (ev.loot) {
+        this.applyLootReturn(ev.loot, logic.x + 8, logic.y + 16);
+        this.toast(THIEF_MSG.caught, 2200);
       }
     }
     this.emSmoke.explode(8, logic.x + 8, logic.y + 16);
@@ -2179,41 +2317,101 @@ export class LevelScene extends Phaser.Scene {
     this.thiefSpawner.noteDespawn({ cooldownAfterDespawn: this.def.thiefCd ?? this.diff.thiefCd });
   }
 
-  private lootTexture(kind: 'cake' | 'arrow' | 'diamond'): string {
-    return kind === 'cake' ? 'placek' : kind === 'arrow' ? 'arrow' : 'diamond';
+  /** pełny zwrot łupu do plecaka + iskierki lecące do HUD */
+  private applyLootReturn(loot: Loot, x: number, y: number): void {
+    const bp: Backpack = {
+      arrows: this.arrows, magic: this.magic,
+      hasCake: this.hasCake, diamondsLevel: this.diamondsLevel,
+    };
+    returnLoot(loot, bp);
+    this.arrows = bp.arrows;
+    this.magic = bp.magic;
+    this.hasCake = bp.hasCake;
+    this.diamondsLevel = bp.diamondsLevel;
+    this.diamondsTotal += loot.diamonds;
+    this.emSpark.explode(10, x, y);
+    const { sx, sy } = this.toScreen(x, y);
+    this.events.emit('hud:flight', {
+      texture: loot.hasCake ? 'placek' : 'arrow', sx, sy, target: 'arrow',
+    });
+    this.events.emit('hud:loot-return');
+    this.sfx('sfx-crystal', 0.5, true);
+    this.emitHud();
   }
 
-  private updateLoot(dt: number): void {
-    for (const l of this.lootDrops) {
-      l.ttl -= dt;
-      if (l.ttl <= 0) {
-        l.sprite.destroy();
-        continue;
-      }
-      l.sprite.setAlpha(l.ttl < 2 ? (Math.floor(this.time.now / 120) % 2 === 0 ? 0.3 : 1) : 1);
-      if (Phaser.Math.Distance.Between(this.player.cx, this.player.cy, l.x, l.y) <= PICKUP_RADIUS) {
-        l.ttl = 0;
-        l.sprite.destroy();
-        if (l.kind === 'cake') this.hasCake = true;
-        else if (l.kind === 'arrow') this.arrows = Math.min(this.arrows + l.count, ARROWS_MAX);
-        else {
-          this.diamondsLevel += l.count;
-          this.diamondsTotal += l.count;
-        }
-        this.toast('Łup odzyskany!', 1600);
-        this.sfx('sfx-crystal', 0.5, true);
-        const { sx, sy } = this.toScreen(l.x, l.y);
-        this.events.emit('hud:flight', { texture: this.lootTexture(l.kind), sx, sy, target: 'arrow' });
-        this.emitHud();
-      }
+  // ── kopczyk (spec playtest2): łup „przepada" do odkopania, bez TTL ──────
+
+  private createMound(x: number, y: number, loot: Loot): void {
+    this.destroyMound();
+    this.mound = new Mound(x, y, loot);
+    const s = this.add.image(x + 8, y, 'mound').setOrigin(0.5, 1).setDepth(-30);
+    // miga co 2 s (spec) — krótki błysk alpha z pauzą
+    this.tweens.add({
+      targets: s, alpha: 0.45, duration: 260, yoyo: true, repeat: -1,
+      repeatDelay: 1700, ease: 'Sine.inOut',
+    });
+    this.moundSprite = s;
+  }
+
+  private destroyMound(): void {
+    this.moundSprite?.destroy();
+    this.moundSprite = null;
+    this.mound = null;
+    this.moundBar?.setVisible(false);
+  }
+
+  /** gracz stoi na kopczyku 0,8 s → odkopuje CAŁY łup (bez +50) */
+  private updateMound(dt: number): void {
+    const m = this.mound;
+    if (!m) {
+      this.moundBar?.setVisible(false);
+      return;
     }
-    this.lootDrops = this.lootDrops.filter((l) => l.ttl > 0);
+    // hojna tolerancja jak przy pickupach (PICKUP_RADIUS ~1,2 kratki)
+    const onIt = this.player.onGround
+      && Math.abs(this.player.cx - (m.x + 8)) < 20
+      && Math.abs(this.player.feetY - m.y) < 10;
+    const done = m.update(dt, onIt);
+    if (onIt && !m.dug) {
+      // pasek postępu odkopywania nad bohaterką + kurz grzebania
+      if (!this.moundBar) {
+        this.moundBar = this.add.rectangle(0, 0, 24, 4, COLN.gold)
+          .setStrokeStyle(1, 0x22223a, 0.8).setDepth(25);
+      }
+      this.moundBar.setVisible(true)
+        .setPosition(this.player.cx, this.player.headY - 9);
+      this.moundBar.width = Math.max(3, 24 * m.progress());
+      if (Math.floor(this.time.now / 150) % 2 === 0) {
+        this.emDust.explode(2, m.x + 8, m.y - 4);
+      }
+    } else {
+      this.moundBar?.setVisible(false);
+    }
+    if (done) {
+      const loot = m.loot;
+      this.destroyMound();
+      this.applyLootReturn(loot, this.player.cx, this.player.cy);
+      this.toast(THIEF_MSG.dugUp, 2000);
+      this.sfx('sfx-gate-open', 0.45);
+    }
   }
 
   // ════════════════════════ ARENA ════════════════════════════════════════
 
   private startArena(instant: boolean): void {
     if (this.phase !== 'PLATFORM' || !this.def.dragon || this.def.arenaX === undefined) return;
+    // przekroczenie triggera `>` w trakcie pościgu / z kopczykiem w terenie:
+    // łup przepada (reguła końca poziomu — spec playtest2); kryształy są
+    // bezpieczne z definicji (nigdy nie są kradzione)
+    if ((this.thiefE && this.thiefE.logic.loot) || this.mound) {
+      this.toast(THIEF_MSG.lootLost, 2400);
+    }
+    if (this.thiefE) {
+      this.emSmoke.explode(6, this.thiefE.logic.x + 8, this.thiefE.logic.y + 16);
+      this.thiefE.destroy();
+      this.thiefE = null;
+    }
+    this.destroyMound();
     // uszczelnienie ściany za graczem + prawa krawędź areny
     for (const rect of this.sealRects) {
       (rect.body as Phaser.Physics.Arcade.StaticBody).enable = true;
@@ -2339,6 +2537,7 @@ export class LevelScene extends Phaser.Scene {
   }
 
   private vabankSay(text: string): void {
+    speakText(this, text);
     this.vabankBubble?.destroy();
     const bubble = this.add.container(0, 0).setDepth(40);
     const label = this.add.text(0, 0, text, {
@@ -2839,7 +3038,11 @@ export class LevelScene extends Phaser.Scene {
   private buildRunner(): void {
     const pattern = RUNNER_PATTERNS[this.def.pattern ?? ''];
     const useLina = !!this.def.gate && this.save.echo_lina;
-    this.rn = new RunnerState(pattern, this.diff, useLina);
+    // tabela biegów: trudność × runner (Skrzat: baza ŁATWY × 0.7) — spec playtest2
+    const gears = runnerGearsFor(this.diffId, this.levelId as RunnerId, this.save.skrzat);
+    this.rn = new RunnerState(pattern, gears, useLina);
+    this.rnLastGear = 1;
+    this.rnMusicRate = 1;
     this.gateLogic = this.def.gate ? new GateState() : null;
     // licznik kryształów HUD/gwiazdek liczy tor runnera
     this.map.crystalTotal = this.rn.crystalTotal;
@@ -2934,6 +3137,7 @@ export class LevelScene extends Phaser.Scene {
     if (!rn || !sim || !view) return;
 
     if (!this.gateOpening) rn.update(dt);
+    this.updateGearLayer(dt);
 
     // input: skok edge-triggered, ślizg trzymany (aneks 8.1/8.3) + dotyk (OR)
     const touch = this.touchFrame;
@@ -3014,6 +3218,7 @@ export class LevelScene extends Phaser.Scene {
       runnerDone: rn.done, playerY: Math.round(sim.y),
       sliding: sim.crouch, crystals: this.crystals,
       nearestN: this.nearestObstacleSx('n'), nearestK: this.nearestObstacleSx('K'),
+      nearestG: this.nearestGapSx(), gear: rn.gear, rnV: Math.round(rn.v),
       gateOpening: this.gateOpening,
     });
 
@@ -3022,6 +3227,95 @@ export class LevelScene extends Phaser.Scene {
       this.onRunnerDone();
     }
     if (this.rnFinished && this.gateLogic) this.updateGate(dt);
+  }
+
+  /**
+   * Warstwa AV systemu biegów (spec playtest2): fanfara + chevrony w HUD przy
+   * zmianie biegu, rate muzyki 1.00–1.12, linie prędkości od biegu 2.
+   */
+  private updateGearLayer(dt: number): void {
+    const rn = this.rn;
+    if (!rn) return;
+    const gear = rn.gear;
+    if (gear !== this.rnLastGear) {
+      const up = gear > this.rnLastGear;
+      this.rnLastGear = gear;
+      this.events.emit('hud:runner-gear', { gear });
+      if (up) this.gearFanfare(gear);
+    }
+    // muzyka: rate per bieg; wraca do 1.00 przy decel (przed areną/bramą)
+    const rate = rn.decel ? 1 : GEAR_MUSIC_RATE[gear - 1];
+    if (rate !== this.rnMusicRate) {
+      this.rnMusicRate = rate;
+      this.setMusicRate(rate);
+    }
+    // linie prędkości: poziome kreski od prawej krawędzi, 2× prędkość scrolla
+    const perSecond = rn.decel ? 0 : GEAR_LINES_PER_S[gear - 1];
+    if (perSecond > 0) {
+      this.rnLineSpawnT += dt * perSecond;
+      while (this.rnLineSpawnT >= 1) {
+        this.rnLineSpawnT -= 1;
+        this.spawnSpeedLine();
+      }
+    }
+    for (const l of this.rnLines) {
+      if (!l.alive) continue;
+      l.rect.x -= 2 * rn.v * dt;
+      if (l.rect.x < -40) {
+        l.alive = false;
+        l.rect.setVisible(false);
+      }
+    }
+  }
+
+  private spawnSpeedLine(): void {
+    let line = this.rnLines.find((l) => !l.alive);
+    if (!line) {
+      if (this.rnLines.length >= 14) return;
+      // zwykły blend (ADD ginie na jasnym niebie świata 2) + delikatny kontur
+      line = {
+        rect: this.add.rectangle(0, 0, 30, 2, 0xffffff, 0.7)
+          .setStrokeStyle(1, 0x22223a, 0.35).setDepth(-25),
+        alive: false,
+      };
+      this.rnLines.push(line);
+    }
+    line.alive = true;
+    line.rect.setVisible(true)
+      .setPosition(660, 24 + Math.random() * 270)
+      .setAlpha(0.45 + Math.random() * 0.3);
+    line.rect.width = 24 + Math.random() * 20;
+  }
+
+  /** fanfara zmiany biegu: arpeggio 3 nut w górę, wyżej z każdym biegiem;
+   *  Tryb Skrzat: dźwięk pominięty (bell wyłączony), wizual w HUD zostaje */
+  private gearFanfare(gear: number): void {
+    if (this.save.skrzat || !this.cache.audio.exists('sfx-crystal')) return;
+    const base = 0.85 + gear * 0.15;
+    for (let i = 0; i < 3; i++) {
+      this.time.delayedCall(i * 90, () => {
+        this.sound.play('sfx-crystal', { volume: 0.45, rate: base * (1 + i * 0.25) });
+      });
+    }
+  }
+
+  private setMusicRate(rate: number): void {
+    const m = this.musicWorld as (Phaser.Sound.BaseSound & {
+      setRate?: (r: number) => void;
+    }) | null;
+    m?.setRate?.(rate);
+  }
+
+  /** ekranowe x najbliższej dziury (dev/e2e — bot skoków) */
+  private nearestGapSx(): number {
+    const rn = this.rn;
+    if (!rn) return 9999;
+    let best = 9999;
+    for (const g of rn.gaps) {
+      const sx = g.x - rn.traveled - RUNNER_PLAYER_X;
+      if (sx > -2 * TILE && sx < best) best = sx;
+    }
+    return Math.round(best);
   }
 
   /** ekranowe x najbliższej żywej przeszkody danego typu (dev/e2e) */
@@ -3201,6 +3495,9 @@ export class LevelScene extends Phaser.Scene {
     this.rnView?.destroy();
     this.rnView = null;
     for (const a of this.arrowPool) this.killArrow(a);
+    for (const l of this.rnLines) l.rect.destroy();
+    this.rnLines = [];
+    this.setMusicRate(1);   // rate muzyki wraca do 1.00 przed areną
     this.rn = null;
     this.rnSim = null;
   }
@@ -3244,7 +3541,7 @@ export class LevelScene extends Phaser.Scene {
       this.gateBlockedT = 0;
       this.gateGlow?.setFillStyle(0x66ff88, 0.4);
       this.sfx('sfx-gate-open', 0.6);
-      this.toast('Brama otwarta! Do bossa!', 2400);
+      this.toast(SCENE_MESSAGES.gateOpen, 2400);
       const view = this.rnView;
       if (view) {
         this.tweens.add({
@@ -3311,6 +3608,16 @@ export class LevelScene extends Phaser.Scene {
     }
     for (const a of this.arrowPool) this.killArrow(a);
     if (this.rnView) this.rnView.iframes = 1.5;
+    // biegi (spec playtest2): reset → bieg 1, muzyka rate 1.00, chevrony = 1
+    this.rnLastGear = 1;
+    this.rnMusicRate = 1;
+    this.setMusicRate(1);
+    this.rnLineSpawnT = 0;
+    for (const l of this.rnLines) {
+      l.alive = false;
+      l.rect.setVisible(false);
+    }
+    this.events.emit('hud:runner-gear', { gear: 1 });
     this.events.emit('hud:runner-start');
     this.events.emit('hud:runner', { progress: 0 });
     this.emitHud();
@@ -3320,6 +3627,20 @@ export class LevelScene extends Phaser.Scene {
 
   private levelComplete(dragonDefeated: boolean): void {
     if (this.frozen) return;
+    // koniec poziomu z niedozyskanym łupem (u złodzieja albo w kopczyku):
+    // łup przepada bezpowrotnie — komunikat i dopiero potem Summary
+    if ((this.thiefE && this.thiefE.logic.loot) || this.mound) {
+      this.thiefE?.destroy();
+      this.thiefE = null;
+      this.destroyMound();
+      this.toast(THIEF_MSG.lootLost, 1800);
+      this.frozen = true;
+      this.time.delayedCall(1600, () => {
+        this.frozen = false;
+        this.levelComplete(dragonDefeated);
+      });
+      return;
+    }
     this.frozen = true;
     this.score += SCORE.level;
     const bonus = Math.max(0, Math.round(this.def.par - this.levelTime)) * SCORE.timeBonusMult;

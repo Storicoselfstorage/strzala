@@ -103,8 +103,8 @@ export const BOSS_P2_PLATFORMS: ReadonlyArray<readonly [number, number, number]>
 export const TUTORIALS: ReadonlyArray<readonly [string, string, string, boolean]> = [
   ['go',      '1-1', '► Idź! [→]', false],
   ['jump',    '1-1', '▲ Skacz! [SPACJA]', false],
-  ['crystal', '1-1', '◊ Zbieraj kryształy!', false],
-  ['cactus',  '1-1', 'Ψ Nie dotykaj! Przeskocz!', true],
+  ['crystal', '1-1', '◊ Zbieraj okruchy smoczych serc!', false],
+  ['cactus',  '1-1', 'Ψ Kaktus: beczka wody i kolców. Przeskocz!', true],
   ['shoot',   '1-1', '» Strzał: [X]', false],
   ['thief',   '1-1', '$ Złodziej! Goń go albo strzelaj!', false],
   ['echo',    '1-1', 'ω Echo z tobą. Gwiżdże przed pułapkami.', false],

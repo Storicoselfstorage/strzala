@@ -49,6 +49,8 @@ export class HUDScene extends Phaser.Scene {
   private runnerBox!: Phaser.GameObjects.Container;
   private runnerFill!: Phaser.GameObjects.Rectangle;
   private runnerHead!: Phaser.GameObjects.Sprite;
+  /** chevrony biegu »×1–4 obok paska postępu (spec playtest2) */
+  private gearText!: Phaser.GameObjects.Text;
 
   constructor() {
     super('HUD');
@@ -149,7 +151,13 @@ export class HUDScene extends Phaser.Scene {
     const goal = this.add.sprite(484 + 6, 56, 'crystal', 0).setScale(0.6);
     goal.play('crystal-spin');
     this.runnerHead = this.add.sprite(156, 56, 'ui-star', 0).setScale(0.8);
-    this.runnerBox.add([rframe, rbg, this.runnerFill, goal, this.runnerHead]);
+    // wskaźnik biegu: 1–4 chevrony `»` na lewo od paska (spec playtest2)
+    this.gearText = this.add.text(142, 56, '»', {
+      fontFamily: FONT_TITLE, fontSize: '12px', color: COL.dim,
+      stroke: COL.ink, strokeThickness: 3,
+    }).setOrigin(1, 0.5);
+    this.runnerBox.add([rframe, rbg, this.runnerFill, goal, this.runnerHead,
+      this.gearText]);
 
     // zdarzenia z Level
     const ev = level.events;
@@ -167,9 +175,15 @@ export class HUDScene extends Phaser.Scene {
     on('hud:arena-end', () => this.arenaBox.setVisible(false));
     on('hud:runner-start', () => this.runnerBox.setVisible(true));
     on('hud:runner', (d: { progress: number }) => this.setRunnerProgress(d.progress));
+    on('hud:runner-gear', (d: { gear: number }) => this.setGear(d.gear));
     on('hud:runner-end', () => this.runnerBox.setVisible(false));
     on('hud:magic-flash', () => this.flash(this.magicText, COLN.cyan));
-    on('hud:steal-flash', () => this.flash(this.arrowText, COLN.danger));
+    on('hud:steal-flash', () => this.stealFlash());
+    on('hud:loot-return', () => {
+      this.flash(this.arrowText, COLN.gold);
+      this.flash(this.magicText, COLN.gold);
+      this.flash(this.diamondText, COLN.gold);
+    });
     on('hud:heart-break', () => this.heartBreak());
 
     const st0 = level.getHudState();
@@ -179,6 +193,38 @@ export class HUDScene extends Phaser.Scene {
       this.runnerBox.setVisible(true);
       this.setRunnerProgress(st0.runner.progress);
     }
+  }
+
+  /** chevrony biegu: `»`×gear + mignięcie ~1 s przy zmianie (spec playtest2) */
+  private setGear(gear: number): void {
+    const g = Math.max(1, Math.min(4, Math.round(gear)));
+    const colors = [COL.dim, COL.gold, '#ffa040', COL.danger];
+    this.gearText.setText('»'.repeat(g));
+    this.gearText.setColor(colors[g - 1]);
+    this.tweens.killTweensOf(this.gearText);
+    this.gearText.setScale(1).setAlpha(1);
+    this.tweens.add({
+      targets: this.gearText, scale: 1.5, duration: 130, yoyo: true, repeat: 3,
+      ease: 'Sine.out',
+      onComplete: () => this.gearText.setScale(1),
+    });
+  }
+
+  /** kradzież całego plecaka: liczniki mrugają fioletem ~2 s + potrząśnięcie */
+  private stealFlash(): void {
+    for (const t of [this.arrowText, this.magicText, this.diamondText]) {
+      t.setTint(COLN.purple);
+      this.tweens.add({
+        targets: t, scale: 1.4, duration: 160, yoyo: true, repeat: 5,
+        ease: 'Sine.out',
+        onComplete: () => {
+          t.setScale(1);
+          t.setTint(0xffffff);
+          t.setTintMode(Phaser.TintModes.MULTIPLY);
+        },
+      });
+    }
+    this.cameras.main.shake(200, 0.006);
   }
 
   private mono(x: number, y: number, str: string, color: string, size: number):

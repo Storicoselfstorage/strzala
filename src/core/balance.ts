@@ -94,15 +94,36 @@ export const POWERUP_MAGNET_TIME = 12.0;
 /** promień 5 kolumn × 16 */
 export const POWERUP_MAGNET_R = 80;
 
-// ── Złodziejaszek (aneks 6.2) ──────────────────────────────────────────────
+// ── Złodziejaszek (aneks 6.2 + spec playtest2: Złodziej 2.0) ───────────────
 /** 10 kol/s × 16 (wolniej niż obie bohaterki) */
 export const THIEF_RUN_SPEED = 160;
-/** ucieczka 14 kol/s × 16 */
+/** ucieczka sprintem 14 kol/s × 16 */
 export const THIEF_FLEE_SPEED = 224;
-/** maks. 6 s ucieczki, potem znika z łupem */
-export const THIEF_FLEE_MAX = 6.0;
-/** upuszczony łup leży 10 s */
-export const THIEF_LOOT_TTL = 10.0;
+/** sprint trwa maks. 6 s (dawne THIEF_FLEE_MAX), potem złodziej się męczy */
+export const THIEF_SPRINT_TIME = 6.0;
+/** zmęczony: 11 kol/s × 16 — wolniej niż Vega (208) i Tosia (256) */
+export const THIEF_TIRED_SPEED = 176;
+/** liczba zawrotek (krawędź mapy / ściana areny), po której się męczy */
+export const THIEF_TIRED_BOUNCES = 2;
+/** po 20 s łącznego flee zakopuje łup (kopczyk) */
+export const THIEF_BURY_AT = 20.0;
+/** kopanie trwa 1,2 s — złodziej bezbronny (złapanie = pełny zwrot) */
+export const THIEF_DIG_TIME = 1.2;
+/** gracz odkopuje kopczyk stojąc na nim 0,8 s (pełny zwrot, bez +50) */
+export const THIEF_MOUND_DIG_TIME = 0.8;
+/** margines krawędzi mapy: 2 kratki — próg zawrotki */
+export const THIEF_EDGE_MARGIN = 32;
+/** podskok nad głową gracza przy mijaniu (|dx| < 32 px) */
+export const THIEF_DODGE_DIST = 32;
+/**
+ * Karencja dotyku po kradzieży: kradzież następuje w overlapie z bohaterką,
+ * więc bez karencji następna klatka = natychmiastowe złapanie i pościg nigdy
+ * nie startuje. 0,5 s wystarcza na odskok (112 px przy 224 px/s); strzała
+ * łapie także w karencji (świadomy strzał ≠ przypadkowy overlap).
+ */
+export const THIEF_STEAL_GRACE = 0.5;
+/** Tryb Skrzat: kradzież ograniczona do 3 zwykłych strzał */
+export const THIEF_STEAL_CAP_SKRZAT = 3;
 /** spawn gdy gracz < 25 kolumn × 16 */
 export const THIEF_SPAWN_DIST = 400;
 /** ...lub po 20 s poziomu */
@@ -197,10 +218,15 @@ export const ENEMY_DROP_CHANCE = { toczek: 0.3, machacz: 0.2, skoczka: 0.3 } as 
 export const RUNNER_PLAYER_X = 160;
 /** kolumny wybiegu na końcu × 16 */
 export const RUNNER_TAIL_PX = 40 * TILE; // 640
-/** przyspieszenie: +1 kol/s co runner_acc_every sekund × 16 */
-export const RUNNER_ACC_STEP = 16;
-/** game.py RunnerState: wytracanie 9 kol/s² × 16 (scroll do 0 w ~2 s) */
-export const RUNNER_DECEL = 144;
+/**
+ * System biegów (spec playtest2): bieg 1–4 wynika z POSTĘPU trasy
+ * (progress < 25% → 1, < 50% → 2, < 75% → 3, ≥ 75% → 4), nie z czasu.
+ */
+export const RUNNER_GEAR_THRESHOLDS = [0, 0.25, 0.5, 0.75] as const;
+/** rampa zmiany biegu: stałe przyspieszenie px/s² (maks. delta 48 → ≤ 1 s) */
+export const RUNNER_GEAR_ACCEL = 48;
+/** wytracanie na końcu sekcji: stop w ≤ 2 s przy maks. 368 px/s (TRUDNY 3-3) */
+export const RUNNER_DECEL = 184;
 /** próg zatrzymania: game.py v ≤ 0,01 kol/s × 16 */
 export const RUNNER_STOP_EPS = 0.16;
 /** ślizg pod Machaczem: hitbox 1 wiersz (aneks 8.3) */
@@ -209,6 +235,11 @@ export const RUNNER_GROUND_Y = RUNNER_GROUND_ROW * TILE; // 304
 
 // ── Trudność (aneks 8.7, levels.py DIFFICULTY) ─────────────────────────────
 export type DifficultyId = 'LATWY' | 'NORMALNY' | 'TRUDNY';
+
+/** id runnera (klucz tabeli biegów) */
+export type RunnerId = '1-3' | '2-3' | '3-3';
+/** prędkości docelowe biegów 1–4 w px/s */
+export type GearTable = readonly [number, number, number, number];
 
 export interface DifficultySettings {
   label: string;
@@ -228,11 +259,8 @@ export interface DifficultySettings {
   dragonFlee: number;
   /** złodziej: cooldown s */
   thiefCd: number;
-  /** runner: v0 → vmax px/s (kol/s × 16) */
-  runnerV0: number;
-  runnerVmax: number;
-  /** runner: +16 px/s co … s */
-  runnerAccEvery: number;
+  /** runner: tabela biegów per runner (spec playtest2, px/s) */
+  runnerGears: Record<RunnerId, GearTable>;
 }
 
 export const DIFFICULTY: Record<DifficultyId, DifficultySettings> = {
@@ -241,21 +269,36 @@ export const DIFFICULTY: Record<DifficultyId, DifficultySettings> = {
     lives: { TOSIA: 6, VEGA: 8 }, outHearts: 3,
     arenaHearts: { TOSIA: 4, VEGA: 5 },
     iframes: 2.0, telegraph: 1.4, fireballSpeed: 224, dragonFlee: 150.0,
-    thiefCd: 45.0, runnerV0: 160, runnerVmax: 224, runnerAccEvery: 10.0,
+    thiefCd: 45.0,
+    runnerGears: {
+      '1-3': [160, 176, 192, 208],
+      '2-3': [160, 192, 208, 224],
+      '3-3': [176, 192, 224, 240],
+    },
   },
   NORMALNY: {
     label: 'NORMALNY',
     lives: { TOSIA: 4, VEGA: 6 }, outHearts: 0,
     arenaHearts: { TOSIA: 3, VEGA: 4 },
     iframes: 1.5, telegraph: 1.0, fireballSpeed: 288, dragonFlee: 120.0,
-    thiefCd: 30.0, runnerV0: 192, runnerVmax: 288, runnerAccEvery: 8.0,
+    thiefCd: 30.0,
+    runnerGears: {
+      '1-3': [192, 224, 256, 288],
+      '2-3': [192, 240, 272, 304],
+      '3-3': [208, 240, 288, 320],
+    },
   },
   TRUDNY: {
     label: 'TRUDNY',
     lives: { TOSIA: 3, VEGA: 4 }, outHearts: 0,
     arenaHearts: { TOSIA: 2, VEGA: 3 },
     iframes: 1.0, telegraph: 0.7, fireballSpeed: 352, dragonFlee: 90.0,
-    thiefCd: 20.0, runnerV0: 224, runnerVmax: 352, runnerAccEvery: 6.0,
+    thiefCd: 20.0,
+    runnerGears: {
+      '1-3': [224, 256, 304, 336],
+      '2-3': [224, 272, 320, 352],
+      '3-3': [240, 288, 336, 368],
+    },
   },
 };
 
