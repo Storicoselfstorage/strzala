@@ -443,6 +443,7 @@ export class LevelScene extends Phaser.Scene {
     this.geysers = [];
     this.bouldersE = [];
     this.vanishE = [];
+    this.bossPlatformsUp = false;
     this.lavaCells = new Set();
     this.powerup = null;
     this.powerupBar = null;
@@ -2257,7 +2258,12 @@ export class LevelScene extends Phaser.Scene {
     // Obsydian: skala ×1,85 + złote rogi + przygaszony tint (czerń+złoto)
     this.dragonE = new DragonEntity(this, this.def.dragon.toLowerCase(),
       isBoss ? { scale: 1.85, horns: true, baseTint: 0x8a8098 } : {});
-    if (isBoss) this.buildVabank();
+    if (isBoss) {
+      this.buildVabank();
+      // decyzja z playtestu (10.08): platformy dostępne od POCZĄTKU walki,
+      // nie dopiero od fazy 2 — gracz od razu widzi, jak sięgnąć smoka
+      this.spawnBossPlatforms();
+    }
     // pooling fireballi
     for (let i = 0; i < 8; i++) {
       const s = this.add.image(0, 0, 'p-circle-big')
@@ -2389,7 +2395,11 @@ export class LevelScene extends Phaser.Scene {
 
   /** Faza 2 „Pogoń": 3 znikające platformy (BOSS_P2_PLATFORMS, v1 przesuwa
    *  o arena_x0 − 60) — z nich strzela się do latającego smoka */
+  private bossPlatformsUp = false;
+
   private spawnBossPlatforms(): void {
+    if (this.bossPlatformsUp) return;
+    this.bossPlatformsUp = true;
     if (this.bossPlatformsSpawned) return;
     this.bossPlatformsSpawned = true;
     const shift = (this.def.arenaX ?? 60) - 60;
@@ -2711,7 +2721,9 @@ export class LevelScene extends Phaser.Scene {
           this.sfx('sfx-dragon-roar', 0.8);
           this.vabankHop();
           this.vabankSay(ev.phase === 2 ? VABANK_TAUNTS.phase2 : VABANK_TAUNTS.phase3);
-          if (ev.phase === 2) this.spawnBossPlatforms();   // v1: tylko ph 2
+          // platformy spawnują się już przy wejściu do areny (decyzja z
+          // playtestu); wywołanie zostaje jako siatka bezpieczeństwa
+          if (ev.phase === 2) this.spawnBossPlatforms();
           break;
         }
         case 'fled':
