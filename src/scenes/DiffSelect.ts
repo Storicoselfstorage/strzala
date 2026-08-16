@@ -7,6 +7,7 @@ import { DifficultyId, DIFFICULTY } from '../core/balance';
 import { loadSave, localStorageAdapter, writeSave } from '../core/save';
 import { addSkyBackdrop, Backdrop, COL, FONT_TITLE, FONT_UI } from '../ui/theme';
 import { devMark } from '../dev';
+import { applyHiRes } from '../ui/hiRes';
 
 const OPTIONS: Array<{ id: DifficultyId; desc: string }> = [
   { id: 'LATWY', desc: 'Więcej serc, wolniejsze smoki.' },
@@ -25,6 +26,7 @@ export class DiffSelectScene extends Phaser.Scene {
   }
 
   create() {
+    applyHiRes(this);
     this.backdrop = addSkyBackdrop(this);
     this.rows = [];
     this.descs = [];

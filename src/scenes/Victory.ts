@@ -6,10 +6,12 @@
  * Zapis wyłącznie przez core/save.ts; potem Scores z podświetlonym wpisem.
  */
 import Phaser from 'phaser';
+import { submitGlobalScore } from '../core/globalScores';
 import { loadSave, localStorageAdapter, writeSave } from '../core/save';
 import { TOSIA_VARIANT } from '../entities/Player';
 import { addSkyBackdrop, Backdrop, COL, COLN, FONT_TITLE, FONT_UI } from '../ui/theme';
 import { devMark } from '../dev';
+import { applyHiRes } from '../ui/hiRes';
 
 const NAME_MIN = 3;
 const NAME_MAX = 8;
@@ -37,6 +39,7 @@ export class VictoryScene extends Phaser.Scene {
   }
 
   create() {
+    applyHiRes(this);
     this.name_ = '';
     this.sel = 0;
     this.cells = [];
@@ -265,6 +268,17 @@ export class VictoryScene extends Phaser.Scene {
     save.highscores.sort((a, b) => b.score - a.score);
     save.highscores = save.highscores.slice(0, 5);
     if (st) writeSave(st, save);
+    // wspólna tabela online — w tle; porażka = wpis dośle się przy WYNIKACH
+    void submitGlobalScore(entry).then((ok) => {
+      if (!ok || !st) return;
+      const s = loadSave(st);
+      const sent = s.highscores.find((h) => h.name === entry.name
+        && h.score === entry.score && !h.synced);
+      if (sent) {
+        sent.synced = true;
+        writeSave(st, s);
+      }
+    });
     this.sound.play('sfx-fanfare', { volume: 0.5 });
     this.sound.stopByKey('music-victory');
     devMark({ scene: 'Victory', committed: true, nameLen: this.name_.length });

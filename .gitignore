@@ -7,3 +7,7 @@ raw-assets/
 e2e/screenshots/
 test-results/
 playwright-report/
+
+# firebase-tools potrafi logować wrażliwe dane (audyt S/N1)
+firebase-debug.log
+firebase-debug.*.log

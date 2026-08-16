@@ -153,7 +153,7 @@ test('WYNIKI: tabela top 5 z zapisu', async ({ page }) => {
   const errors = collectErrors(page);
   await seedSave(page);
   await intoMenu(page);
-  await pressPaced(page, 'ArrowDown', 'ArrowDown');   // WYNIKI
+  await pressPaced(page, 'ArrowDown', 'ArrowDown', 'ArrowDown');   // WYNIKI (za NOWĄ GRĄ)
   await page.keyboard.press('Space');
   await waitScene(page, 'Scores');
   expect(await page.evaluate(() => window.__strzala?.entries)).toBe(2);
@@ -167,7 +167,7 @@ test('WYNIKI: tabela top 5 z zapisu', async ({ page }) => {
 test('AUTORZY: przewijana lista kredytów', async ({ page }) => {
   const errors = collectErrors(page);
   await intoMenu(page);
-  await pressPaced(page, 'ArrowDown', 'ArrowDown', 'ArrowDown');   // AUTORZY
+  await pressPaced(page, 'ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown');   // AUTORZY
   await page.keyboard.press('Space');
   await waitScene(page, 'Credits');
   await page.waitForTimeout(700);

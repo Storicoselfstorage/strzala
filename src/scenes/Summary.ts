@@ -12,6 +12,7 @@ import { WIN_MESSAGES } from '../data/texts';
 import { speakText } from '../ui/speak';
 import { addSkyBackdrop, Backdrop, COL, FONT_TITLE, FONT_UI } from '../ui/theme';
 import { devMark } from '../dev';
+import { applyHiRes } from '../ui/hiRes';
 
 export interface SummaryData {
   levelId: string;
@@ -41,6 +42,7 @@ export class SummaryScene extends Phaser.Scene {
   }
 
   create() {
+    applyHiRes(this);
     const d = this.data_;
     this.backdrop = addSkyBackdrop(this);
     this.saveProgress(d);

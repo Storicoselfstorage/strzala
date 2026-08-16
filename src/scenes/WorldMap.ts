@@ -13,6 +13,7 @@ import { loadSave, localStorageAdapter, SaveData } from '../core/save';
 import { DragonId, DRAGONS, LEVEL_DEF, LEVEL_ORDER, MAPS } from '../data/levels';
 import { addSkyBackdrop, Backdrop, COL, COLN, FONT_TITLE, FONT_UI } from '../ui/theme';
 import { devMark } from '../dev';
+import { applyHiRes } from '../ui/hiRes';
 
 interface NodeDef {
   id: string;
@@ -61,6 +62,7 @@ export class WorldMapScene extends Phaser.Scene {
   }
 
   create() {
+    applyHiRes(this);
     this.nodes = [];
     this.toastText = null;
     this.backdrop = addSkyBackdrop(this);

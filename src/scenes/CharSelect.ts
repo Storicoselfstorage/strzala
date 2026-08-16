@@ -9,6 +9,7 @@ import { loadSave, localStorageAdapter, writeSave } from '../core/save';
 import { addSkyBackdrop, Backdrop, COL, COLN, FONT_TITLE, FONT_UI } from '../ui/theme';
 import { TOSIA_VARIANT } from '../entities/Player';
 import { devMark } from '../dev';
+import { applyHiRes } from '../ui/hiRes';
 
 interface Card {
   id: CharacterId;
@@ -34,6 +35,7 @@ export class CharSelectScene extends Phaser.Scene {
   }
 
   create() {
+    applyHiRes(this);
     this.backdrop = addSkyBackdrop(this);
     this.cards = [];
     this.selected = 0;

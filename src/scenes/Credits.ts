@@ -8,6 +8,7 @@
 import Phaser from 'phaser';
 import { CREDITS_DATA, CREDITS_THANKS } from '../data/texts';
 import { addSkyBackdrop, Backdrop, COL, FONT_TITLE, FONT_UI } from '../ui/theme';
+import { applyHiRes, RENDER_SCALE } from '../ui/hiRes';
 import { devMark } from '../dev';
 
 const VIEW_TOP = 78;
@@ -17,6 +18,9 @@ const VIEW_W = 448;
 /** offset świata treści — poza kadrem kamery głównej */
 const OFF_X = 2000;
 const PAD = 12;
+/** zoom ×2 (hi-res): scroll kamery ma semantykę „środek minus pół viewportu",
+ *  więc scrollY = górna krawędź okna − VIEW_H/2 (analogicznie X) */
+const LIST_SCROLL_OFF_Y = VIEW_H / 2;
 
 export class CreditsScene extends Phaser.Scene {
   private backdrop!: Backdrop;
@@ -30,6 +34,7 @@ export class CreditsScene extends Phaser.Scene {
   }
 
   create() {
+    applyHiRes(this);
     this.backdrop = addSkyBackdrop(this);
 
     this.add.text(320, 40, 'AUTORZY', {
@@ -66,9 +71,13 @@ export class CreditsScene extends Phaser.Scene {
     y += 26;
     this.contentH = y;
 
-    // kamera-okno: widzi tylko obszar treści
-    this.listCam = this.cameras.add(VIEW_X, VIEW_TOP, VIEW_W, VIEW_H);
-    this.listCam.setScroll(OFF_X, -PAD);
+    // kamera-okno: widzi tylko obszar treści (viewport w px canvasa = ×2)
+    this.listCam = this.cameras.add(
+      VIEW_X * RENDER_SCALE, VIEW_TOP * RENDER_SCALE,
+      VIEW_W * RENDER_SCALE, VIEW_H * RENDER_SCALE,
+    );
+    this.listCam.setZoom(RENDER_SCALE);
+    this.listCam.setScroll(OFF_X - VIEW_W / 2, -PAD - LIST_SCROLL_OFF_Y);
 
     const hint = this.add.text(320, 344, '[↑↓] przewiń      [ESC] powrót', {
       fontFamily: FONT_UI, fontSize: '12px', color: COL.dim,
@@ -91,8 +100,8 @@ export class CreditsScene extends Phaser.Scene {
 
   update(_t: number, delta: number) {
     this.backdrop.update(delta);
-    const minScroll = -PAD;
-    const maxScroll = Math.max(minScroll, this.contentH - VIEW_H + PAD);
+    const minScroll = -PAD - LIST_SCROLL_OFF_Y;
+    const maxScroll = Math.max(minScroll, this.contentH - VIEW_H + PAD - LIST_SCROLL_OFF_Y);
     if (this.cursors.up.isDown) {
       this.listCam.scrollY = Math.max(minScroll, this.listCam.scrollY - (90 * delta) / 1000);
       this.autoDelay = 2000;

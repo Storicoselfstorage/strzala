@@ -6,7 +6,8 @@
 import { describe, expect, it } from 'vitest';
 import { ARROWS_START } from '../src/core/balance';
 import {
-  defaultSave, loadSave, SAVE_BAK_KEY, SAVE_KEY, StorageLike, writeSave,
+  defaultSave, loadSave, resetCampaign, SAVE_BAK_KEY, SAVE_KEY, StorageLike,
+  writeSave,
 } from '../src/core/save';
 
 class FakeStorage implements StorageLike {
@@ -108,5 +109,58 @@ describe('korupcja → strzala2.save.bak + defaulty, nigdy wyjątek', () => {
       setItem: () => { throw new Error('QuotaExceededError'); },
     };
     expect(writeSave(st, defaultSave())).toBe(false);
+  });
+});
+
+// NOWA GRA (menu): kampania od zera, dorobek rodziny zostaje
+describe('resetCampaign', () => {
+  function finishedSave() {
+    const s = defaultSave();
+    s.character = 'VEGA';
+    s.difficulty = 'TRUDNY';
+    s.skrzat = true;
+    s.muted = true;
+    s.unlocked = ['1-1', '1-2', '1-3', '2-1', '2-2', '2-3', '3-1', '3-2', '3-3', 'BOSS'];
+    s.levels = { '1-1': { completed: true, best_score: 900, best_time: 61, stars: 3 } };
+    s.dragons_defeated = ['1-2', '1-3', '2-2', '2-3', '3-2'];
+    s.echo_lina = true;
+    s.total_diamonds = 44;
+    s.arrows = 9;
+    s.has_cake = false;
+    s.campaign_score = 10800;
+    s.highscores = [{ name: 'TATA', score: 10800, stars: 21 }];
+    s.seen_tutorials = ['jump'];
+    s.interludes_seen = ['intro', 'after-1-3', 'after-2-3', 'finale'];
+    return s;
+  }
+
+  it('kampania wraca do defaultów (postęp, plecak, scenki, wynik)', () => {
+    const fresh = resetCampaign(finishedSave());
+    const base = defaultSave();
+    expect(fresh.unlocked).toEqual(base.unlocked);
+    expect(fresh.levels).toEqual({});
+    expect(fresh.dragons_defeated).toEqual([]);
+    expect(fresh.campaign_score).toBe(0);
+    expect(fresh.arrows).toBe(ARROWS_START);
+    expect(fresh.has_cake).toBe(true);
+    expect(fresh.total_diamonds).toBe(0);
+    expect(fresh.echo_lina).toBe(false);
+    expect(fresh.interludes_seen).toEqual([]);   // intro zagra od nowa
+    expect(fresh.seen_tutorials).toEqual([]);
+  });
+
+  it('tabela wyników, tryb Skrzat i mute przeżywają reset', () => {
+    const fresh = resetCampaign(finishedSave());
+    expect(fresh.highscores).toEqual([{ name: 'TATA', score: 10800, stars: 21 }]);
+    expect(fresh.skrzat).toBe(true);
+    expect(fresh.muted).toBe(true);
+  });
+
+  it('reset → zapis → odczyt daje grywalny świeży stan', () => {
+    const st = new FakeStorage();
+    writeSave(st, resetCampaign(finishedSave()));
+    const loaded = loadSave(st);
+    expect(loaded.unlocked).toEqual(['1-1']);
+    expect(loaded.highscores.length).toBe(1);
   });
 });

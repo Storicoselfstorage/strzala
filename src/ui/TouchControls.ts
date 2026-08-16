@@ -30,6 +30,7 @@
  */
 import Phaser from 'phaser';
 import { COL, COLN, FONT_TITLE, FONT_UI } from '../ui/theme';
+import { applyHiRes, LOGICAL_WIDTH, RENDER_SCALE } from '../ui/hiRes';
 import { devMark } from '../dev';
 
 type HeldId = 'left' | 'right' | 'down';
@@ -65,6 +66,7 @@ export class TouchControlsScene extends Phaser.Scene {
   }
 
   create() {
+    applyHiRes(this);
     // multi-touch: ruch + skok + strzał jednocześnie
     this.input.addPointer(3);
 
@@ -155,9 +157,11 @@ export class TouchControlsScene extends Phaser.Scene {
     return [...Object.values(this.held), ...Object.values(this.edge)];
   }
 
-  /** strefa dotyku w px gry: co najmniej 64 px CSS po przeliczeniu skali FIT */
+  /** strefa dotyku w px gry: co najmniej 64 px CSS po przeliczeniu skali FIT
+   *  (px LOGICZNY = px CSS · LOGICAL_WIDTH / displayWidth — bufor jest ×2,
+   *  ale kamera z zoomem ×2 pokazuje 640 jednostek logicznych na szerokość) */
   private resizeZones(): void {
-    const scale = Math.max(0.001, this.scale.displaySize.width / this.scale.gameSize.width);
+    const scale = Math.max(0.001, this.scale.displaySize.width / LOGICAL_WIDTH);
     const size = Math.max(48, Math.ceil(64 / scale) + 8);
     this.zoneHalf = size / 2;
     for (const b of this.allButtons()) {
@@ -228,7 +232,11 @@ export class TouchControlsScene extends Phaser.Scene {
       let hit = false;
       for (const p of this.input.manager.pointers) {
         if (!p.isDown) continue;
-        if (Math.abs(p.x - b.x) <= this.zoneHalf && Math.abs(p.y - b.y) <= this.zoneHalf) {
+        // p.x/p.y są w px bufora (×2) — pozycje przycisków w px logicznych;
+        // kamera stoi na kadrze 0,0–640,360, więc wystarczy podzielić
+        const px = p.x / RENDER_SCALE;
+        const py = p.y / RENDER_SCALE;
+        if (Math.abs(px - b.x) <= this.zoneHalf && Math.abs(py - b.y) <= this.zoneHalf) {
           hit = true;
           break;
         }

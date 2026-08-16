@@ -103,6 +103,12 @@ export const SCENE_MESSAGES = {
   gateOpen: 'Brama otwarta! Na szczyt, do Obsydiana!',
 } as const;
 
+// Menu — NOWA GRA (czytane przez lektora).
+export const MENU_MESSAGES = {
+  newGameConfirm: 'Zacząć przygodę od nowa? Postęp zniknie, ale tabela wyników zostanie.',
+  newGameGo: 'Nowa przygoda czeka. Powodzenia, łowczyni!',
+} as const;
+
 export const GAME_OVER = {
   header: 'ALE AKCJA!',
   line: 'Złap oddech. Wyspa czeka na rewanż.',

@@ -223,10 +223,11 @@ export const RUNNER_TAIL_PX = 40 * TILE; // 640
  * (progress < 25% → 1, < 50% → 2, < 75% → 3, ≥ 75% → 4), nie z czasu.
  */
 export const RUNNER_GEAR_THRESHOLDS = [0, 0.25, 0.5, 0.75] as const;
-/** rampa zmiany biegu: stałe przyspieszenie px/s² (maks. delta 48 → ≤ 1 s) */
-export const RUNNER_GEAR_ACCEL = 48;
-/** wytracanie na końcu sekcji: stop w ≤ 2 s przy maks. 368 px/s (TRUDNY 3-3) */
-export const RUNNER_DECEL = 184;
+/** rampa zmiany biegu: stałe przyspieszenie px/s² — kopniak ma być czuć
+ *  od razu (playtest 3: maks. delta 64 → rampa ≤ 0,67 s) */
+export const RUNNER_GEAR_ACCEL = 96;
+/** wytracanie na końcu sekcji: stop w ≤ 2 s przy maks. 416 px/s (TRUDNY 1-3) */
+export const RUNNER_DECEL = 208;
 /** próg zatrzymania: game.py v ≤ 0,01 kol/s × 16 */
 export const RUNNER_STOP_EPS = 0.16;
 /** ślizg pod Machaczem: hitbox 1 wiersz (aneks 8.3) */
@@ -270,10 +271,12 @@ export const DIFFICULTY: Record<DifficultyId, DifficultySettings> = {
     arenaHearts: { TOSIA: 4, VEGA: 5 },
     iframes: 2.0, telegraph: 1.4, fireballSpeed: 224, dragonFlee: 150.0,
     thiefCd: 45.0,
+    // playtest 3: większy rozstrzał biegów — start spokojny, finisz z wiatrem
+    // we włosach; sufit = min. odstęp przeszkód / 1,5 s (test wykonalności)
     runnerGears: {
-      '1-3': [160, 176, 192, 208],
-      '2-3': [160, 192, 208, 224],
-      '3-3': [176, 192, 224, 240],
+      '1-3': [160, 192, 224, 256],
+      '2-3': [160, 200, 232, 260],
+      '3-3': [176, 208, 240, 264],
     },
   },
   NORMALNY: {
@@ -283,9 +286,9 @@ export const DIFFICULTY: Record<DifficultyId, DifficultySettings> = {
     iframes: 1.5, telegraph: 1.0, fireballSpeed: 288, dragonFlee: 120.0,
     thiefCd: 30.0,
     runnerGears: {
-      '1-3': [192, 224, 256, 288],
-      '2-3': [192, 240, 272, 304],
-      '3-3': [208, 240, 288, 320],
+      '1-3': [192, 240, 288, 336],
+      '2-3': [192, 248, 296, 336],
+      '3-3': [208, 256, 304, 340],
     },
   },
   TRUDNY: {
@@ -295,9 +298,9 @@ export const DIFFICULTY: Record<DifficultyId, DifficultySettings> = {
     iframes: 1.0, telegraph: 0.7, fireballSpeed: 352, dragonFlee: 90.0,
     thiefCd: 20.0,
     runnerGears: {
-      '1-3': [224, 256, 304, 336],
-      '2-3': [224, 272, 320, 352],
-      '3-3': [240, 288, 336, 368],
+      '1-3': [224, 288, 352, 416],
+      '2-3': [224, 300, 360, 408],
+      '3-3': [240, 312, 376, 412],
     },
   },
 };

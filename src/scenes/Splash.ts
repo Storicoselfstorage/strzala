@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { devMark } from '../dev';
+import { applyHiRes, LOGICAL_WIDTH, LOGICAL_HEIGHT } from '../ui/hiRes';
 
 export class SplashScene extends Phaser.Scene {
   private layers: Array<{ sprite: Phaser.GameObjects.TileSprite; speed: number }> = [];
@@ -9,7 +10,10 @@ export class SplashScene extends Phaser.Scene {
   }
 
   create() {
-    const { width, height } = this.scale;
+    applyHiRes(this);
+    // wymiary LOGICZNE kadru — this.scale to rozmiar bufora ×2 (hi-res)
+    const width = LOGICAL_WIDTH;
+    const height = LOGICAL_HEIGHT;
     this.layers = [];
 
     // Niebo rozciągnięte na cały ekran; chmury dokowane do dołu (duże z tyłu).

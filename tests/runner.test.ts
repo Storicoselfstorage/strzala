@@ -111,8 +111,8 @@ describe('biegi z postępu trasy (tabela trudność × runner)', () => {
     expect(rn.gear).toBe(4);
   });
 
-  it('rampa: monotonicznie, ≤ 48 px/s² na klatkę, cel w ≤ 1,05 s', () => {
-    // NORMALNY 2-3: największa delta biegów 1→2 (192 → 240 = 48 px/s)
+  it('rampa: monotonicznie, ≤ RUNNER_GEAR_ACCEL na klatkę, cel w ≤ 1,05 s', () => {
+    // NORMALNY 2-3: delta biegów 1→2 (192 → 248 = 56 px/s; rampa 96 → 0,58 s)
     const gears = NG('2-3');
     const rn = new RunnerState(RUNNER_2_3, gears);
     while (rn.gear < 2) rn.update(DT60);
@@ -148,10 +148,14 @@ describe('biegi z postępu trasy (tabela trudność × runner)', () => {
     expect(rn.arrowPacks[0].taken).toBe(false);
   });
 
-  it('decel: od 368 px/s (TRUDNY 3-3) stop w ≤ 2,0 s', () => {
+  it('decel: od maks. prędkości w grze stop w ≤ 2,0 s', () => {
+    // playtest 3: najszybszy bieg w grze = TRUDNY 1-3 bieg 4 (416 px/s)
+    const vMax = Math.max(...(['LATWY', 'NORMALNY', 'TRUDNY'] as DifficultyId[])
+      .flatMap((d) => (['1-3', '2-3', '3-3'] as RunnerId[])
+        .flatMap((r) => [...DIFFICULTY[d].runnerGears[r]])));
     const rn = new RunnerState(RUNNER_3_3_FULL, DIFFICULTY.TRUDNY.runnerGears['3-3']);
     rn.decel = true;
-    rn.v = 368;
+    rn.v = vMax;
     let t = 0;
     while (!rn.done && t < 5) {
       rn.update(DT60);
@@ -159,7 +163,7 @@ describe('biegi z postępu trasy (tabela trudność × runner)', () => {
     }
     expect(rn.done).toBe(true);
     expect(t).toBeLessThanOrEqual(2.0 + DT60);
-    expect(368 / RUNNER_DECEL).toBeLessThanOrEqual(2.0);
+    expect(vMax / RUNNER_DECEL).toBeLessThanOrEqual(2.0);
     expect(rn.progress()).toBeLessThanOrEqual(1);
   });
 

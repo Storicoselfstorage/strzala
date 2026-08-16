@@ -5,6 +5,7 @@
 import Phaser from 'phaser';
 import { loadSave, localStorageAdapter, writeSave } from '../core/save';
 import { COL, COLN, FONT_TITLE, FONT_UI } from '../ui/theme';
+import { applyHiRes } from '../ui/hiRes';
 
 interface PauseHudState {
   crystals: number; crystalTotal: number;
@@ -28,6 +29,7 @@ export class PauseScene extends Phaser.Scene {
   }
 
   create() {
+    applyHiRes(this);
     const level = this.scene.get(this.levelKey) as Phaser.Scene & {
       getHudState(): PauseHudState;
     };

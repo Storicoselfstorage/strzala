@@ -3,6 +3,7 @@
  * Jedno miejsce na spójną paletę (checklista B1: paleta spójna).
  */
 import Phaser from 'phaser';
+import { LOGICAL_WIDTH, LOGICAL_HEIGHT } from './hiRes';
 
 export const FONT_TITLE = '"Press Start 2P"';
 export const FONT_UI = '"Pixelify Sans"';
@@ -74,7 +75,9 @@ export interface Backdrop {
 
 /** tło świata 1 (kompozycja jak Splash): niebo + dwie warstwy dryfujących chmur */
 export function addSkyBackdrop(scene: Phaser.Scene): Backdrop {
-  const { width, height } = scene.scale;
+  // wymiary LOGICZNE kadru — scene.scale to rozmiar bufora ×2 (hi-res)
+  const width = LOGICAL_WIDTH;
+  const height = LOGICAL_HEIGHT;
   const sky = scene.add.tileSprite(0, 0, width, height, 'world1-sky').setOrigin(0, 0);
   sky.tileScaleX = height / 128;
   sky.tileScaleY = height / 128;

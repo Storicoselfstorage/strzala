@@ -48,10 +48,20 @@ import { ThiefEntity } from '../entities/ThiefEntity';
 import { EchoEntity } from '../entities/EchoEntity';
 import { DragonEntity } from '../entities/DragonEntity';
 import { COL, COLN, FONT_TITLE, FONT_UI } from '../ui/theme';
+import { RENDER_SCALE } from '../ui/hiRes';
 import { devMark, devParam } from '../dev';
 
 const GAME_FIELD_Y = 40;    // wiersz HUD 40 px NAD polem gry 320 px
 const FIELD_H = 320;
+
+// ── hi-res (bufor ×2, kamera pola gry z zoom ×2 — patrz ui/hiRes.ts) ──────
+// Zoom Phasera skaluje wokół ŚRODKA viewportu, stąd dwie konsekwencje:
+//  · scrollX/scrollY to już NIE lewy-górny róg kadru — róg czytaj z
+//    cam.worldView.x/y; przy zapisie scrolla celuj w „róg − HIRES_OFF";
+//  · obiekty setScrollFactor(0) rysują się o HIRES_OFF za wysoko/w lewo —
+//    ich pozycje przesuwamy o +HIRES_OFF (kompensacja stała, bo zoom=2).
+const HIRES_OFF_X = 320;          // pół logicznej szerokości kadru (640/2)
+const HIRES_OFF_Y = FIELD_H / 2;  // pół logicznej wysokości pola gry
 
 import { SCENE_MESSAGES, THIEF_MESSAGES as THIEF_MSG } from '../data/texts';
 import { speakText, speakTexts, stopSpeech } from '../ui/speak';
@@ -532,14 +542,14 @@ export class LevelScene extends Phaser.Scene {
       // niebo: okno źródła 90–128 px wygładzonego assetu (linia lawendowej
       // poświaty pod HUD + czysty błękit) — strefa przejścia pasm (wiersze
       // 79–89: dither + szarość) rozciągnięta na pół ekranu wygląda jak glitch
-      const sky = this.add.tileSprite(0, 0, 640, FIELD_H, 'world1-sky')
+      const sky = this.add.tileSprite(HIRES_OFF_X, HIRES_OFF_Y, 640, FIELD_H, 'world1-sky')
         .setOrigin(0, 0).setScrollFactor(0).setDepth(-100);
       sky.tileScaleX = FIELD_H / 38;
       sky.tileScaleY = FIELD_H / 38;
       sky.tilePositionY = 90;
-      const small = this.add.tileSprite(0, 56, 640, 48, 'world1-clouds-small')
+      const small = this.add.tileSprite(HIRES_OFF_X, HIRES_OFF_Y + 56, 640, 48, 'world1-clouds-small')
         .setOrigin(0, 0).setScrollFactor(0).setDepth(-95);
-      const big = this.add.tileSprite(0, 148, 640, 101, 'world1-clouds-big')
+      const big = this.add.tileSprite(HIRES_OFF_X, HIRES_OFF_Y + 148, 640, 101, 'world1-clouds-big')
         .setOrigin(0, 0).setScrollFactor(0).setDepth(-90);
       this.skyLayers = [
         { ts: sky, factor: 0, drift: 0 },
@@ -554,11 +564,11 @@ export class LevelScene extends Phaser.Scene {
     const nearKey = this.world === 2 ? 'world2-near' : 'world3-near';
     const farH = this.world === 2 ? 192 : 176;
     const nearH = this.world === 2 ? 144 : 128;
-    const sky = this.add.tileSprite(0, 0, 640, FIELD_H, skyKey)
+    const sky = this.add.tileSprite(HIRES_OFF_X, HIRES_OFF_Y, 640, FIELD_H, skyKey)
       .setOrigin(0, 0).setScrollFactor(0).setDepth(-100);
-    const far = this.add.tileSprite(0, FIELD_H - farH, 640, farH, farKey)
+    const far = this.add.tileSprite(HIRES_OFF_X, HIRES_OFF_Y + FIELD_H - farH, 640, farH, farKey)
       .setOrigin(0, 0).setScrollFactor(0).setDepth(-95);
-    const near = this.add.tileSprite(0, FIELD_H - nearH, 640, nearH, nearKey)
+    const near = this.add.tileSprite(HIRES_OFF_X, HIRES_OFF_Y + FIELD_H - nearH, 640, nearH, nearKey)
       .setOrigin(0, 0).setScrollFactor(0).setDepth(-90);
     this.skyLayers = [
       { ts: sky, factor: 0, drift: 0 },
@@ -997,11 +1007,11 @@ export class LevelScene extends Phaser.Scene {
   }
 
   private buildWarnArrow(): void {
-    this.warnArrow = this.add.image(616, 150, 'ui-arrows', 1)
+    this.warnArrow = this.add.image(HIRES_OFF_X + 616, HIRES_OFF_Y + 150, 'ui-arrows', 1)
       .setScrollFactor(0).setDepth(50).setTint(COLN.purple).setScale(1.5)
       .setVisible(false);
     // marker `$` przy strzałce: pościg za łupem / kierunek do kopczyka
-    this.warnDollar = this.add.text(616, 150, '$', {
+    this.warnDollar = this.add.text(HIRES_OFF_X + 616, HIRES_OFF_Y + 150, '$', {
       fontFamily: FONT_TITLE, fontSize: '12px', color: COL.gold,
       stroke: COL.ink, strokeThickness: 4,
     }).setOrigin(0.5).setScrollFactor(0).setDepth(50).setVisible(false);
@@ -1025,7 +1035,10 @@ export class LevelScene extends Phaser.Scene {
 
   private setupCamera(): void {
     const cam = this.cameras.main;
-    cam.setViewport(0, GAME_FIELD_Y, 640, FIELD_H);
+    // viewport w px BUFORA (×2); bounds/follow/deadzone w px logicznych —
+    // przy zoomie ×2 klamrowanie idzie po displayWidth, więc kadr bez zmian
+    cam.setViewport(0, GAME_FIELD_Y * RENDER_SCALE, 640 * RENDER_SCALE, FIELD_H * RENDER_SCALE);
+    cam.setZoom(RENDER_SCALE);
     cam.setBounds(0, 0, this.map.widthPx, FIELD_H);
     cam.startFollow(this.player.carrier, true, 0.14, 0.14);
     cam.setDeadzone(110, 60);
@@ -1158,10 +1171,11 @@ export class LevelScene extends Phaser.Scene {
     });
   }
 
-  /** przelicznik świat → ekran (dla lotu pickupu do HUD w scenie-nakładce) */
+  /** przelicznik świat → ekran (dla lotu pickupu do HUD w scenie-nakładce);
+   *  worldView, nie scroll — scroll przy zoomie ×2 nie jest rogiem kadru */
   private toScreen(x: number, y: number): { sx: number; sy: number } {
     const cam = this.cameras.main;
-    return { sx: x - cam.scrollX, sy: y - cam.scrollY + GAME_FIELD_Y };
+    return { sx: x - cam.worldView.x, sy: y - cam.worldView.y + GAME_FIELD_Y };
   }
 
   private hitStop(ms: number): void {
@@ -1189,7 +1203,7 @@ export class LevelScene extends Phaser.Scene {
   update(_time: number, delta: number) {
     let dt = Math.min(delta / 1000, 0.05);
     for (const l of this.skyLayers) {
-      l.ts.tilePositionX = this.cameras.main.scrollX * l.factor + this.time.now / 1000 * l.drift;
+      l.ts.tilePositionX = this.cameras.main.worldView.x * l.factor + this.time.now / 1000 * l.drift;
     }
     if (this.hitStopT > 0) {
       this.hitStopT -= delta / 1000;
@@ -1805,7 +1819,7 @@ export class LevelScene extends Phaser.Scene {
 
   private overlayBox(lines: Array<{ text: string; size: number; color: string }>):
   Phaser.GameObjects.Container {
-    const cont = this.add.container(0, 0).setScrollFactor(0).setDepth(200);
+    const cont = this.add.container(HIRES_OFF_X, HIRES_OFF_Y).setScrollFactor(0).setDepth(200);
     const dim = this.add.rectangle(320, FIELD_H / 2, 640, FIELD_H, 0x0b0b14, 0.62);
     let y = FIELD_H / 2 - 42;
     let maxW = 0;
@@ -2222,7 +2236,7 @@ export class LevelScene extends Phaser.Scene {
     let showWarn = false;
     let dollar = false;
     let side: -1 | 1 = this.warnSide;
-    const scrollX = this.cameras.main.scrollX;
+    const scrollX = this.cameras.main.worldView.x;
     if (this.thiefE && this.thiefE.logic.alive) {
       const sx = this.thiefE.logic.x - scrollX;
       if (sx < -8) { showWarn = true; side = -1; }
@@ -2240,12 +2254,14 @@ export class LevelScene extends Phaser.Scene {
     this.warnArrow.setVisible(showWarn && blink);
     if (showWarn) {
       this.warnArrow.setFrame(side > 0 ? 1 : 3);
-      this.warnArrow.x = side > 0 ? 616 : 24;
-      this.warnArrow.y = 140;
+      this.warnArrow.x = HIRES_OFF_X + (side > 0 ? 616 : 24);
+      this.warnArrow.y = HIRES_OFF_Y + 140;
     }
     if (this.warnDollar) {
       this.warnDollar.setVisible(dollar && blink);
-      if (dollar) this.warnDollar.setPosition(side > 0 ? 594 : 46, 140);
+      if (dollar) {
+        this.warnDollar.setPosition(HIRES_OFF_X + (side > 0 ? 594 : 46), HIRES_OFF_Y + 140);
+      }
     }
   }
 
@@ -2483,11 +2499,12 @@ export class LevelScene extends Phaser.Scene {
       cam.setDeadzone(110, 60);
     };
     if (instant) {
-      cam.setScroll(arenaX0, 0);
+      // scroll przy zoomie ×2: lewy-górny róg kadru = scroll + HIRES_OFF
+      cam.setScroll(arenaX0 - HIRES_OFF_X, -HIRES_OFF_Y);
       lock();
     } else {
       this.tweens.add({
-        targets: cam, scrollX: arenaX0, duration: 700, ease: 'Sine.inOut',
+        targets: cam, scrollX: arenaX0 - HIRES_OFF_X, duration: 700, ease: 'Sine.inOut',
         onComplete: lock,
       });
     }
@@ -2571,8 +2588,8 @@ export class LevelScene extends Phaser.Scene {
       } else if (this.vabank) {
         this.vabankBubble.setPosition(
           Phaser.Math.Clamp(this.vabank.x,
-            this.cameras.main.scrollX + 130, this.cameras.main.scrollX + 510),
-          Math.max(this.cameras.main.scrollY + 30, this.vabank.y - 74),
+            this.cameras.main.worldView.x + 130, this.cameras.main.worldView.x + 510),
+          Math.max(this.cameras.main.worldView.y + 30, this.vabank.y - 74),
         );
         this.vabankBubble.setAlpha(this.vabankBubbleT < 0.5 ? this.vabankBubbleT * 2 : 1);
       }
@@ -2997,7 +3014,7 @@ export class LevelScene extends Phaser.Scene {
       this.emConfetti.explode(56, cx, cy - 30);
       for (let i = 1; i <= 7; i++) {
         this.time.delayedCall(i * 340, () => {
-          const bx = this.cameras.main.scrollX + 80 + Math.random() * 480;
+          const bx = this.cameras.main.worldView.x + 80 + Math.random() * 480;
           const by = 50 + Math.random() * 140;
           this.emConfetti.explode(32, bx, by);
           this.emSpark.explode(16, bx, by);
@@ -3096,9 +3113,11 @@ export class LevelScene extends Phaser.Scene {
     );
     this.ensureArrowPool();
     this.buildRunnerChaser();
-    // kamera statyczna: świat scrolluje, nie kamera
+    // kamera statyczna: świat scrolluje, nie kamera (viewport w px bufora ×2)
     const cam = this.cameras.main;
-    cam.setViewport(0, GAME_FIELD_Y, 640, FIELD_H);
+    cam.setViewport(0, GAME_FIELD_Y * RENDER_SCALE, 640 * RENDER_SCALE, FIELD_H * RENDER_SCALE);
+    cam.setZoom(RENDER_SCALE);
+    cam.centerOn(320, FIELD_H / 2);
     cam.setBounds(0, 0, 640, FIELD_H);
     cam.setBackgroundColor(COLN.night);
   }

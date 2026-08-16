@@ -20,6 +20,8 @@ export interface HighscoreEntry {
   name: string;
   score: number;
   stars: number;
+  /** wpis dotarł już do wspólnej tabeli online (playtest 3); brak = do wysyłki */
+  synced?: boolean;
 }
 
 /** schemat aneksu 11.4 (version 2) + pola v1 (seen_tutorials, interludes)
@@ -99,6 +101,19 @@ export function loadSave(storage: StorageLike): SaveData {
     }
     return defaultSave();
   }
+}
+
+/**
+ * NOWA GRA (menu): kampania od zera, ale dorobek rodziny zostaje —
+ * tabela wyników, tryb Skrzat i wyciszenie przeżywają reset.
+ */
+export function resetCampaign(save: SaveData): SaveData {
+  return {
+    ...defaultSave(),
+    highscores: save.highscores,   // ze znacznikami synced — bez ponownej wysyłki
+    skrzat: save.skrzat,
+    muted: save.muted,
+  };
 }
 
 /** zapis; false gdy storage odmówił (np. tryb prywatny) — bez wyjątku */

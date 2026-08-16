@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import { IMAGES, SPRITESHEETS, AUDIO } from '../data/assetManifest';
 import { ANIMS } from '../data/animations';
 import { VOICE_FILES } from '../data/voiceFiles';
+import { applyHiRes, LOGICAL_WIDTH, LOGICAL_HEIGHT } from '../ui/hiRes';
 
 export class PreloadScene extends Phaser.Scene {
   constructor() {
@@ -9,7 +10,10 @@ export class PreloadScene extends Phaser.Scene {
   }
 
   preload() {
-    const { width, height } = this.scale;
+    // kamera hi-res już tutaj — pasek postępu rysuje się przed create()
+    applyHiRes(this);
+    const width = LOGICAL_WIDTH;
+    const height = LOGICAL_HEIGHT;
     const barW = 240;
     const barH = 12;
 

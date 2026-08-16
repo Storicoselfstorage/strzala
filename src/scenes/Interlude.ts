@@ -11,6 +11,7 @@ import { FINALE_LINES, INTRO_LINES, WORLD_TRANSITIONS } from '../data/texts';
 import { addSkyBackdrop, Backdrop, COL, COLN, FONT_TITLE, FONT_UI } from '../ui/theme';
 import { speakText, stopSpeech } from '../ui/speak';
 import { devMark } from '../dev';
+import { applyHiRes } from '../ui/hiRes';
 
 export type InterludeId = 'intro' | 'after-1-3' | 'after-2-3' | 'finale';
 
@@ -74,6 +75,7 @@ export class InterludeScene extends Phaser.Scene {
   }
 
   create() {
+    applyHiRes(this);
     this.lineIdx = 0;
     this.shown = 0;
     this.typing = false;

@@ -5,6 +5,7 @@
  */
 import Phaser from 'phaser';
 import { COL, COLN, FONT_TITLE, FONT_UI } from '../ui/theme';
+import { applyHiRes } from '../ui/hiRes';
 
 interface HudState {
   levelLabel: string;
@@ -61,6 +62,7 @@ export class HUDScene extends Phaser.Scene {
   }
 
   create() {
+    applyHiRes(this);
     // instancja sceny żyje przez cały czas gry — pola-tablice z poprzedniego
     // uruchomienia trzymają ZNISZCZONE obiekty (regresja: zwiecha przy
     // drugim starcie poziomu, e2e/repro-freeze.spec.ts)
